@@ -20,3 +20,5 @@ configs/secrets/
 .idea/
 .vscode/
 *.swp
+
+local
