@@ -1,0 +1,36 @@
+# Example: expose an internal app at myapp.builderrors.com
+#
+# Public Server: VPS with IP 203.0.113.10, domain builderrors.com on Cloudflare
+# Internal Client: home lab, service at 127.0.0.1:8080
+#
+# Copy to server.yaml / client.yaml and replace tokens.
+
+public_listen: ":443"
+http_listen: ":80"
+root_domain: "builderrors.com"
+control_host: "tunnel.builderrors.com"
+
+tls:
+  cache_dir: "/var/lib/httphop/certs"
+  email: "admin@builderrors.com"
+  disable: false
+
+tunnel:
+  poll_timeout: 30s
+  session_timeout: 60s
+  max_streams_per_tunnel: 256
+
+proxy:
+  response_header_timeout: 60s
+
+tunnels:
+  - subdomain: "myapp"
+    token: "REPLACE_WITH_RANDOM_TOKEN_AT_LEAST_32_CHARS"
+    max_clients: 1
+
+status:
+  enabled: true
+  listen: "127.0.0.1:9090"
+
+logging:
+  level: "info"

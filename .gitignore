@@ -1,0 +1,17 @@
+# Binaries
+/bin/
+*.exe
+
+# Go
+/vendor/
+
+# Local config overrides
+configs/*.local.yaml
+
+# TLS / cert cache
+/var/
+
+# IDE
+.idea/
+.vscode/
+*.swp

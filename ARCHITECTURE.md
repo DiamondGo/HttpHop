@@ -1,7 +1,8 @@
-# HttpHop 详细设计文档(v4)
+# HttpHop 详细设计文档(v6)
 
-> **文档状态**:设计定稿,尚未开始实现。仓库 `/home/kexie/source/HttpHop` 目前为空。
-> **本文目标**:详细到可以直接照着写代码 —— 包含结构体定义、函数签名、协议规范、关键逻辑伪代码、配置样例、分阶段实现顺序与验收标准。
+> **文档状态**:设计定稿,尚未开始实现。仓库 `/home/kexie/source/HttpHop` 目前仅有本文档。
+> **传输层**:HTTP 长轮询虚拟连接 + yamux 多路复用由共享库 [`github.com/DiamondGo/pollmux`](https://github.com/DiamondGo/pollmux) 提供(库本身已完成;HttpBroker 迁移验证中)。HttpHop **不**再维护 `internal/transport`,只写应用层 glue。
+> **本文目标**:详细到可以直接照着写代码 —— 包含结构体定义、函数签名、HttpHop 特有逻辑、配置样例、分阶段实现顺序与验收标准。wire 协议与传输机制见 pollmux 的 `DESIGN.md` / `README.md`。
 
 ---
 
@@ -11,8 +12,8 @@
 2. [已确定的决策](#二已确定的决策)
 3. [设计评审:发现的问题与改进](#三设计评审发现的问题与改进)
 4. [总体架构](#四总体架构)
-5. [传输层详细设计](#五传输层详细设计)
-6. [隧道控制协议规范](#六隧道控制协议规范)
+5. [传输层:引用 pollmux](#五传输层引用-pollmux)
+6. [HttpHop 控制面约定](#六httphop-控制面约定)
 7. [心跳与失效检测](#七心跳与失效检测)
 8. [服务端详细设计](#八服务端详细设计)
 9. [客户端详细设计](#九客户端详细设计)
@@ -21,7 +22,7 @@
 12. [日志与可观测性](#十二日志与可观测性)
 13. [包结构与文件清单](#十三包结构与文件清单)
 14. [依赖](#十四依赖)
-15. [分阶段实现顺序与验收](#十五分阶段实现顺序与验收)
+15. [分阶段实现顺序与验收](#十五分阶段实现顺序与验收) — 详见 [plans/IMPLEMENTATION.md](plans/IMPLEMENTATION.md)
 16. [测试计划](#十六测试计划)
 17. [MVP 范围与推后项](#十七mvp-范围与推后项)
 18. [已知限制](#十八已知限制)
@@ -35,9 +36,9 @@
 - **Server(服务端)**:部署在有公网 IP 和域名、但本地资源很少的机器上。对外提供 HTTPS 服务,把收到的公网 HTTP 请求转发给已连接的 Client。
 - **Client(客户端)**:部署在内网(无法被外部主动连接)、但本地算力/服务很强的机器上。接收 Server 转发过来的请求,转发到本地可访问的 HTTP 服务,再把响应原路返回。
 
-典型场景:把内网的强力 HTTP 服务通过一台轻量公网机器暴露到互联网,不需要端口映射,也不暴露内网。
+典型场景:把内网的强力 HTTP 服务通过一台轻量公网机器暴露到互联网 —— 支持 **子域名整站映射**(`myapp.example.com/*`)与 **根域路径映射**(`example.com/service/*` → 内网 `/*`),不需要端口映射,也不暴露内网,且**不需要**在公网另装 nginx。
 
-**参考项目**:`~/source/HttpBroker` 是同一作者的兄弟项目,实现了 SOCKS5-over-HTTP 隧道。它的 `internal/transport` 包已经把"长轮询作为虚拟连接"这件事做得相当完善,HttpHop 直接移植复用(并修掉本文第三节列出的缺陷)。
+**参考项目**:`~/source/HttpBroker` 是同一作者的兄弟项目,实现了 SOCKS5-over-HTTP 隧道。HttpHop 与 HttpBroker 在"长轮询虚拟连接 + yamux"层高度相似,共同部分已抽成 **`github.com/DiamondGo/pollmux`**(含 A1–A5、B1 第一层、D3/D10 等修复)。HttpHop 只实现 HttpBroker 没有的应用层:公网 `ReverseProxy`、子域名路由、多租户注册表、autocert 等。
 
 **角色对应关系**:
 
@@ -55,12 +56,14 @@
 | # | 决策 | 依据 |
 |---|---|---|
 | 1 | 实现语言 **Go**(≥ 1.21) | 单文件静态编译、goroutine 模型天然适配、与 HttpBroker 一致可复用代码 |
-| 2 | Server 支持**多个 Client 同时接入**,按**子域名**路由 | 用户明确要求 |
-| 3 | 传输层**必须用长轮询**,并**把长轮询本身当作心跳** | 用户明确要求:服务端要**尽早**知道某条路径不能服务了 |
-| 4 | 长轮询的缺点参照 `~/source/HttpBroker` 的做法解决 | 用户明确指定 |
-| 5 | 公网侧用 **`httputil.ReverseProxy` + 自定义 `DialContext`**,并把桥接逻辑抽进 `bridge.go` 为裸 TCP 预留 | 见 §3.C。裸桥接方案会被 HTTP/2 打崩、拿不到真实客户端 IP、且**无法支撑后续的会话保持需求** |
-| 6 | 后续要做**负载均衡 + 会话保持**;MVP **只预留结构、不实现策略** | 见 §3.F。预留成本约几十行,不预留将来要同时改三处 |
-| 7 | 下行吞吐 MVP **只做"加大 poll 缓冲"这一层**;流式 chunked poll 推到 MVP 之后 | 见 §3.B。地基要先跑稳再优化 |
+| 2 | 公网侧支持 **域名映射 + 路径映射**,不依赖 nginx 等外部反代 | 用户明确要求:如 `builderrors.com/service/*` → 内网 `/*`,须由 HttpHop 自身完成 Host 选择与 URI 改写 |
+| 3 | Server 支持**多个 Client 同时接入**;域名维度按 Host(子域名或根域)路由,路径维度按**最长前缀匹配** | 与 #2 配套;同一 Host 上可挂多条不同 `path_prefix` 的隧道 |
+| 4 | 传输层**必须用长轮询**,并**把长轮询本身当作心跳** | 用户明确要求:服务端要**尽早**知道某条路径不能服务了;由 pollmux 实现 |
+| 5 | 长轮询传输层使用 **`github.com/DiamondGo/pollmux`**,不复制 HttpBroker 旧 `internal/transport` | 缺陷修一次、两边受益;`EnableKeepAlive=false` 等约束封进库 API;服务端 **Limits 下发**消除双端配置漂移 |
+| 6 | 公网侧用 **`httputil.ReverseProxy` + 自定义 `DialContext`**,并把桥接逻辑抽进 `bridge.go` 为裸 TCP 预留 | 见 §3.C。裸桥接方案会被 HTTP/2 打崩、拿不到真实客户端 IP、且**无法支撑后续的会话保持需求** |
+| 7 | 后续要做**负载均衡 + 会话保持**;MVP **只预留结构、不实现策略** | 见 §3.F。预留成本约几十行,不预留将来要同时改三处 |
+| 8 | 下行吞吐 MVP **只做"加大 poll 缓冲"这一层**;流式 chunked poll 推到 MVP 之后 | 见 §3.B。由 pollmux `PollBufferSize` 可配,默认 256KB |
+| 9 | **前置依赖**:pollmux API 经 HttpBroker 迁移验证后再发版;开发期可用 `go.mod` 的 `replace` 指本地路径 | 见 pollmux `DESIGN.md` 决策 #1 |
 
 ---
 
@@ -87,7 +90,7 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
 **修复**:
 
 - `pollClient.Transport.ResponseHeaderTimeout = poll_timeout + poll_grace`(30s + 10s = 40s)。
-  **理论依据**:健康的服务端在**最迟 `poll_timeout` 时刻一定会返回 204**(见 §6 的 `handlePoll` 契约),所以超过 `poll_timeout + 宽限` 还没收到响应头,就是确定性的链路故障证据。
+  **理论依据**:健康的服务端在**最迟 `poll_timeout` 时刻一定会返回 204**(pollmux `PollHandler` 契约),所以超过 `poll_timeout + 宽限` 还没收到响应头,就是确定性的链路故障证据。
 - `Transport.DialContext` 用 `&net.Dialer{Timeout: 10s, KeepAlive: 15s}`,开启 TCP keepalive。
 - **发送请求用独立的、更短超时的 `sendClient`**(`Timeout: 15s`)—— 发送不该被长轮询的宽松超时约束。
 - 结果:**空闲期最坏检测延迟 ≈ 40s;有流量时 ≈ 15s**。
@@ -98,11 +101,11 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
 
 **问题**:yamux 每流默认 256KB 窗口,并发 10 条流在途数据就可能超过 1MB → 服务端 400 → `doSend` 看到非 200/204 → `signalTransportFailed()` → **整条隧道断开重连,所有在途请求全挂**。
 
-**修复**:
+**修复**(由 pollmux 实现):
 
-- `flushLoop` 每次最多取 `max_send_chunk`(默认 512KB)。
-- 服务端 `MaxBytesReader` 上限 = `max_send_chunk × 2`(1MB),两边写进注释互相引用。
-- 服务端超限返回 **413**(不是 400),客户端把 413 当作**可恢复错误**:把 `max_send_chunk` 减半后重试,而不是判定传输失败。
+- 服务端在 connect 时通过 **`limits.max_send_bytes`** 下发权威分片上限;客户端实际取 `min(本地 max_send_chunk, 服务端值)`。
+- `flushLoop` 每次最多取该上限(默认 512KB,以服务端为准)。
+- 服务端超限返回 **413**(不是 400)。守规矩的客户端在 `min()` 之后**不应**再触发 413 —— 若出现,视为**协议违规/对端 bug**,记录日志并关闭会话重连,**不做减半重试**(那条带状态的重试路径是双端各配一份上限时的权宜之计,参数下发后整段删除)。
 
 #### A3. 服务端侧失效检测太慢(最坏 6 分钟)⚠️ 违背需求 #3
 
@@ -120,12 +123,12 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
 
 **证据**:`pipe.go:39` 是 `p.buf = append(p.buf, data...)`,完全无上限。
 
-**修复**(靠上层流控兜底,而不是给 pipe 加阻塞语义 —— 后者会引入死锁风险):
+**修复**(由 pollmux 实现;**原稿 64KB 窗口是错误的**):
 
-- `yamux.Config.MaxStreamWindowSize` 从默认 256KB 降到 **64KB**(隧道的实际带宽时延积远小于此)。
-- 每隧道最大并发流 **256**,超出直接返回 503。
-- 上限内存 ≈ 256 × 64KB = **16MB / 隧道**。
-- `BufferedPipe` 增加 `HighWaterMark`,超过时打 warn 日志(仅告警,不阻塞)。
+- yamux **强制** `MaxStreamWindowSize ≥ 256KB`(`initialStreamWindow`),设为 64KB 会让 `yamux.Client()`/`Server()` **直接报错**,隧道建不起来。降窗口也不是加背压 —— 它会把单流吞吐摁回 64KB/RTT,抵消 B1 的 poll 缓冲修复。
+- pollmux 保持地板值 **256KB**;控内存靠**并发流数**,不靠缩窗口。
+- HttpHop 应用层设 `max_streams_per_tunnel`(默认 256),超出直接返回 503。
+- 最坏内存 ≈ 256KB × 典型并发流数,**约 64MB/隧道**(多租户需乘以隧道数);`BufferedPipe` 加高水位告警(`HighWaterWarn`),仅观测不阻塞。
 
 #### A5. 服务端关闭会话时,客户端不会及时重连(新发现)
 
@@ -133,7 +136,7 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
 
 **问题**:服务端主动关闭会话(优雅停机、yamux 会话死亡、管理员踢下线)后,客户端会**一直空转轮询**,直到 `session_timeout` 把会话从注册表里清掉、客户端才收到 404。这期间隧道实际已经不可用,但客户端不知道要重连。
 
-**修复**:`handlePoll` 在 `err == io.EOF` 时返回 **410 Gone**(而不是 204);客户端把 410 与 404/401 同等对待 —— 触发 `signalTransportFailed()` 立即进入重连。
+**修复**:pollmux `PollHandler` 在 `err == io.EOF` 时返回 **410 Gone**(而不是 204);客户端把 410 与 404/401 同等对待 —— 触发 `TransportFailed()` 立即进入重连。
 
 ### B. 吞吐瓶颈
 
@@ -155,7 +158,7 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
 
 **第二层(MVP 之后)**:流式 chunked poll 响应。服务端保持响应体打开,用 `Transfer-Encoding: chunked` 在最长 `poll_timeout` 内持续写入多个带 4 字节长度前缀的数据块;客户端边读边喂给 `readPipe`。下行从"每 RTT 一次往返"变成**接近连续的流**,吞吐不再受 RTT 限制。心跳语义完全保留(响应仍在 `poll_timeout` 到期时结束;空闲时每 15s 发一个 0 长度 keepalive 块,`ResponseHeaderTimeout` 换成基于块间隔的读超时)。
 
-**推后理由**:(a) 要重写 `pollLoop` 和 `handlePoll` 两个地基函数,应等 MVP 跑通、传输层有测试覆盖后再动;(b) 前置 CDN/nginx 的某些配置会缓冲 chunked 响应导致该模式直接失效,需要实测。
+**推后理由**:(a) 要重写 pollmux 的 `pollLoop` 和 `PollHandler` 两个地基函数,应等 MVP 跑通、有测试覆盖后再动;(b) 前置 CDN/nginx 的某些配置会缓冲 chunked 响应导致该模式直接失效,需要实测。
 **为它预留**:`poll_mode: batch | stream` 现在就加进配置结构体,MVP 只接受 `batch`,传 `stream` 直接启动失败并提示未实现。
 
 ### C. 公网侧改用 `httputil.ReverseProxy`(推翻早期的裸桥接方案)
@@ -202,9 +205,10 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
 
 ### E. 工程化
 
-- 移植 HttpBroker 的 `pipe_test.go` / `httpconn_test.go` 作为传输层单测基础。
+- 传输层单测由 **pollmux** 承担(`go test -race ./...` 已覆盖 A1/A2/A5 等);HttpHop 只写应用层单测与集成测试。
 - 新增端到端集成测试:进程内起 server + client + 本地 echo 服务。
-- 模块路径 `github.com/DiamondGo/HttpHop`(与 HttpBroker 一致)。Go ≥ 1.21。
+- 模块路径 `github.com/DiamondGo/HttpHop`(与 HttpBroker / pollmux 一致)。Go ≥ 1.21。
+- 日志边界:pollmux 用 `*slog.Logger`;HttpHop 继续用 zap,经 `go.uber.org/zap/exp/zapslog` 桥接。
 
 ### F. 为后续的负载均衡 + 会话保持预留结构(MVP 只预留,不实现策略)
 
@@ -231,6 +235,124 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
 
 **明确不在 MVP 内**:轮询/最少连接策略、sticky cookie 读写、后端健康剔除、故障重试。
 
+### G. 公网路由:域名映射 + 路径映射(MVP 必须)
+
+HttpHop **自行**完成公网入口的路由与 URI 改写,**不**假设前置 nginx/Caddy。两层正交:
+
+| 层 | 输入 | 作用 |
+|---|---|---|
+| **域名映射** | `Host` 头 | 选定根域上的**路由组**(子域名或 apex 根域) |
+| **路径映射** | `URL.Path` | 在该 Host 上按 **`path_prefix` 最长前缀匹配** 选隧道,并按规则改写路径 |
+
+#### G0. 部署建议:优先整子域名映射
+
+**推荐默认方案**:为每个内网服务分配独立子域名(`myapp.builderrors.com`),**不**配置 `path_prefix`。公网路径与内网路径一致,后端跳转、Cookie、静态资源无需额外处理,Client 也不感知公网路由规则。
+
+**备选方案**:必须在 apex 根域上挂路径时(如 `builderrors.com/service/*`),使用 `subdomain: "@"` + `path_prefix` + `strip_prefix`。Server 在转发时会剥前缀,并在响应侧改写 **`Location`** 与 **`Set-Cookie` Path**(等价 nginx `proxy_redirect` / `proxy_cookie_path`),以覆盖常见 302 与会话 Cookie。**不改写 HTML/JS 正文**;静态资源或前端路由仍可能需要应用配置公网 base path。**除非必须占用 apex 路径,否则优先用子域名。**
+
+| 方式 | 示例 | 路径是否一致 | 推荐 |
+|---|---|---|---|
+| 子域名整站 | `myapp.builderrors.com/auth` → 内网 `/auth` | ✅ | **首选** |
+| apex + 路径前缀 | `builderrors.com/service/auth` → 内网 `/auth` | ❌(需剥/补前缀) | 仅当必须 |
+
+#### G1. Host 键:子域名与 apex 根域
+
+沿用 `root_domain`(如 `builderrors.com`)。`TunnelBinding.subdomain` 取值:
+
+| 配置值 | 匹配的 Host | 内部 registry 键 |
+|---|---|---|
+| `"myapp"` | `myapp.builderrors.com` | `"myapp"` |
+| `"@"` | **`builderrors.com`**(apex,无子域前缀) | `"@"` |
+| 省略 `path_prefix` | 该 Host 下**所有路径**(该组的默认/兜底路由) | — |
+
+> apex 用 `"@"` 而非空字符串,避免与「未配置」混淆。`router.HostKey(host, rootDomain)` 返回 `(key, nil)` 或错误。
+
+**典型场景(builderrors.com)**:
+
+```yaml
+# 推荐:整子域名映射
+tunnels:
+  - subdomain: "myapp"
+    token: "..."
+    max_clients: 1
+# 效果: https://myapp.builderrors.com/foo → 内网 /foo (路径不改写)
+
+# 备选:apex 路径前缀 (仅当必须占用 builderrors.com/service 时)
+tunnels:
+  - subdomain: "@"
+    path_prefix: "/service"
+    strip_prefix: true
+    token: "..."
+    max_clients: 1
+# 效果: https://builderrors.com/service/auth → 内网 /auth
+# 响应头 Location / Set-Cookie Path 由 Server 自动补回 /service 前缀
+```
+
+另见 §G0。完整配置示例见 [README.md](README.md)。
+
+#### G2. 路径规则字段
+
+每条 `TunnelBinding` 可选路径字段(MVP):
+
+```go
+type TunnelBinding struct {
+    Subdomain   string // "myapp" 或 "@"
+    PathPrefix  string // 默认 "" = 匹配该 Host 的全部路径(兜底)
+    StripPrefix bool   // true:转发前去掉 PathPrefix(见 G3)
+    Token       string
+    MaxClients  int
+}
+```
+
+**匹配规则**:
+
+1. 解析 Host → host key(`"myapp"` / `"@"`)。
+2. 在该 key 下,取所有已注册且 `Alive()` 的 binding 的 `PathPrefix`,做**最长前缀匹配**。
+3. 若无任何 `PathPrefix` 命中,使用该 Host 下 `PathPrefix == ""` 的**兜底** binding(若存在)。
+4. 若仍无 → **404** `no route for host/path`。
+5. 启动时校验:同一 `(subdomain, path_prefix)` 不重复;**禁止**两条非空前缀互为前缀且指向不同 token(配置冲突,启动失败)。
+
+**`strip_prefix` 语义**(在 `ReverseProxy.Rewrite` 里改 `pr.Out.URL.Path`,Client **无需**知道公网前缀):
+
+| 公网 Path | PathPrefix | StripPrefix | 转发 Path |
+|---|---|---|---|
+| `/service/auth` | `/service` | true | `/auth` |
+| `/service` | `/service` | true | `/` |
+| `/service/auth` | `/service` | false | `/service/auth` |
+| `/api/v1/x` | `/api/v1` | true | `/x` |
+
+Query string 原样保留。`PathPrefix` 必须 `path.Clean` 后以 `/` 开头;`/service` 与 `/service/` 在匹配时等价(统一去掉尾部 `/` 再比,**除**前缀恰为 `/` 的情况)。
+
+#### G3. 与 Client 的关系
+
+- **路径改写在 Server 侧完成**,经 yamux 流发给 Client 的已是改写后的 HTTP 请求;Client 仍只 `Dial(local.target)`,**不**配置 `path_prefix`,**不需要**知道公网 `path_prefix`。
+- 使用 `strip_prefix` 时,Server **`ModifyResponse`** 还会把后端的 `Location` / `Set-Cookie Path` 补回公网前缀(见 G0);Client 不参与。
+- 一个 Client 实例仍对应**一个** `local.target`;同一 Host 上多条路径前缀若指向同一 token/subdomain,共享一条隧道;若指向不同 token,则对应不同 Client 实例。
+- `host_header_rewrite`(D2)与路径映射正交:默认保持公网 Host(`builderrors.com`);若内网服务依赖 Host,可配 rewrite。
+
+#### G4. 路由数据结构
+
+```go
+// internal/router/route.go
+type Route struct {
+    HostKey    string // "myapp" | "@"
+    PathPrefix string // "" 表示兜底
+    Strip      bool
+    Pool       *registry.TunnelPool // 由 binding 的 subdomain/token 解析
+}
+
+// 启动时由 []TunnelBinding 编译;运行时只读。
+type RouteTable struct { /* per-host sorted by len(PathPrefix) desc */ }
+
+func (t *RouteTable) Match(hostKey, path string) (*Route, error)
+```
+
+`Registry` 仍按 subdomain(= host key)维护 `TunnelPool`;`RouteTable` 持有到 pool 的引用,**不**重复会话状态。
+
+#### G5. 证书
+
+`HostPolicy` 除控制域外,须为所有出现过的 host key 签发证书:各子域名 + 若存在 `"@"` binding 则包含 **apex** `root_domain`。
+
 ---
 
 ## 四、总体架构
@@ -248,20 +370,19 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
     │  :443 标准 http.Server(autocert TLS,HostPolicy 限制签发)     │
     │          │                                                   │
     │          ├─ Host == tunnel.example.com ─→ gorilla/mux 控制面  │
-    │          │      POST   /tunnel/connect      客户端注册        │
-    │          │      POST   /tunnel/{id}/poll    长轮询(收)/立即发 │
-    │          │      DELETE /tunnel/{id}         干净下线          │
-    │          │      GET    /status              健康观测          │
+    │          │      pollmux Connect/Poll/Delete handler 挂载     │
+    │          │      GET    /status              健康观测(HttpHop)│
     │          │                                                   │
     │          └─ 其他 Host ─→ servePublic()                        │
-    │                  │ 1. router.Subdomain(Host) 解析子域名       │
-    │                  │ 2. Registry.Pool(sub) 查池                 │
-    │                  │ 3. pool.Pick(r) 选后端(MVP: firstAvail)   │
-    │                  │ 4. 健康 / 并发上限检查                      │
-    │                  │ 5. 塞进 context,交给 ReverseProxy         │
+    │                  │ 1. router.HostKey(Host) → "myapp"|"@"      │
+    │                  │ 2. router.RouteTable.Match(key, Path)       │
+    │                  │ 3. pool.Pick(r) 选后端(MVP: firstAvail)     │
+    │                  │ 4. 健康 / 并发上限检查                        │
+    │                  │ 5. context(tunnel + PathRewrite)           │
+    │                  │ 6. ReverseProxy(Rewrite 里改 Path + XFF)    │
     │                  ▼                                           │
     │           httputil.ReverseProxy                               │
-    │             Rewrite:  SetXForwarded + 保持原 Host             │
+    │             Rewrite:  SetXForwarded + Path 改写 + Host        │
     │             Transport.DialContext → bridge.OpenStream()       │
     │             FlushInterval: -1(SSE 实时)                      │
     │             ErrorHandler → 502 / 503 / 504                    │
@@ -270,13 +391,13 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
     │           Registry map[subdomain]*TunnelPool                  │
     └──────────────────────────────────────────────────────────────┘
                                    │
-              虚拟连接 = 滚动的 HTTP 长轮询循环
-       Client 侧 HTTPConn  ←──────────────────→  Server 侧 Session
-       (pollLoop + flushLoop)                  (ToServer/FromServer 两个 BufferedPipe)
+              虚拟连接 = pollmux 长轮询(读写分离)
+       Client 侧 pollmux.Conn  ←──────────────→  Server 侧 pollmux.Session
+       (pollLoop + flushLoop)                    (PollHandler + yamux Client)
                                    │
     ┌──────────────────────────────────────────────────────────────┐
     │                          CLIENT                              │
-    │  HTTPConn(pollLoop 长轮询收 + flushLoop 合并写)               │
+    │  pollmux.Connector → Conn; ReconnectLoop + AcceptLoop         │
     │  yamux.Server —— Accept() 循环                                │
     │          │                                                   │
     │          ▼ 每条流 → net.DialTimeout("tcp", local_target)      │
@@ -289,489 +410,262 @@ httpClient := &http.Client{ Timeout: 0 }   // 无限
 
 ### 单个公网请求的完整路径
 
+**例 A — 子域名,无路径前缀**:`https://myapp.builderrors.com/auth`
+
+**例 B — apex + 路径前缀**:`https://builderrors.com/service/auth` → 内网 `/auth`
+
 ```
 公网调用方
-  │ ① HTTPS 请求  Host: myapp.httphop.io
+  │ ① HTTPS  Host + Path
   ▼
-Server :443  (http.Server 解析请求)
-  │ ② servePublic:解析子域名 "myapp" → Registry 查池 → Pick 后端
-  │ ③ 塞 tunnel 进 context,proxy.ServeHTTP
+Server :443
+  │ ② servePublic: HostKey + RouteTable.Match → Pick 后端
+  │ ③ context 携带 tunnel 与 PathRewrite(strip /service 等)
   ▼
-ReverseProxy.Rewrite  (注入 X-Forwarded-For 等,保持原 Host)
-  │ ④ Transport.RoundTrip → DialContext
+ReverseProxy.Rewrite  (XFF + 改写 pr.Out.URL.Path + 保持/改写 Host)
+  │ ④ DialContext → bridge.OpenStream
   ▼
-bridge.OpenStream(tunnel)  → yamux.Session.Open()  返回一条流(net.Conn)
-  │ ⑤ Go 标准库把 HTTP 请求写进这条流
+…(pollmux 隧道,与 v5 相同)…
   ▼
-yamux 把流数据切成帧 → 写进 Session.FromServer (BufferedPipe)
-  │ ⑥ 客户端挂起的长轮询 poll 请求被唤醒,把数据作为 200 响应体返回
-  ▼
-Client HTTPConn.readPipe → yamux.Server 解帧 → Accept() 到这条流
-  │ ⑦ StreamHandler.Handle:DialTimeout 本地服务
-  ▼
-本地 HTTP 服务处理请求,返回响应
-  │ ⑧ io.Copy 回 yamux 流 → HTTPConn.Write → flushLoop 合并 → X-Send-Only POST
-  ▼
-Server handlePoll 把请求体写进 Session.ToServer → yamux 解帧
-  │ ⑨ Go 标准库 http.ReadResponse 从流上读出响应
-  ▼
-ReverseProxy 把响应写回公网调用方(FlushInterval: -1,逐块实时)
+Client → 127.0.0.1:8080/auth   ← 例 B 已是 /auth,非 /service/auth
 ```
 
 ---
 
-## 五、传输层详细设计
+## 五、传输层:引用 pollmux
 
-包 `internal/transport`,从 `~/source/HttpBroker/internal/transport` 移植并修改。**这是整个项目的地基,必须先做对。**
+HTTP 长轮询虚拟连接、yamux 配置、connect/poll/delete 端点、客户端 `pollLoop`/`flushLoop`、会话扫描等**全部在 pollmux 内实现**。HttpHop 不维护 `internal/transport/`。
 
-### 5.1 `pipe.go` —— `BufferedPipe`
+**设计原则**:pollmux 只管"字节怎么在两台机器之间流动",不管这些字节是什么、也不管两端是什么角色。HttpHop 的应用语义(`client_id` → `subdomain`、本地健康、公网路由)走 **`meta` 映射**和 **`Hooks` 回调**。
 
-线程安全的内存管道,用 `sync.Mutex` + `sync.Cond`。**基本原样移植**,仅加 A4 的高水位告警。
+### 5.1 pollmux 提供的核心类型
+
+| 类型 | 用途 |
+|---|---|
+| `pollmux.Conn` | 客户端侧虚拟连接(`io.ReadWriteCloser` + `TransportFailed()` + `Limits()`) |
+| `pollmux.Connector` | 发起 connect、启动 pollLoop |
+| `pollmux.Session` | 服务端侧纯传输会话(无 subdomain 等应用字段) |
+| `pollmux.SessionStore` | 按 `session_id` 索引传输会话 |
+| `pollmux.ServerConfig` | 服务端传输参数(`PollTimeout`、`MaxSendBytes`、`PollBufferSize` 等) |
+| `pollmux.Hooks` | 应用插桩:`Authenticate` / `OnConnect` / `OnPoll` / `OnDisconnect` |
+| `pollmux.ConnectHandler` / `PollHandler` / `DeleteHandler` | 可挂载的 HTTP handler |
+| `pollmux.YamuxConfig()` / `ClientSession()` / `ServerSession()` | 封装 `EnableKeepAlive=false` 等约束 |
+| `pollmux.ReconnectLoop` / `pollmux.AcceptLoop` | 客户端重连与 Accept 四路 select |
+
+完整 API 与 wire 格式见 `github.com/DiamondGo/pollmux` 源码与 `DESIGN.md`。
+
+### 5.2 yamux 角色与配置
+
+**角色分配**(与 HttpBroker provider 侧一致):
+
+- **Server = yamux Client** —— `pollmux.ClientSession(session)` 后 `Open()` 流,把每个公网请求推给 Client。
+- **Client = yamux Server** —— `pollmux.ServerSession(conn)` 后 `Accept()` 流。
+
+**必须**通过 pollmux 建会话,不要自行调 `yamux.Client()`/`Server()`:
 
 ```go
-type BufferedPipe struct {
-    mu     sync.Mutex
-    cond   *sync.Cond
-    buf    []byte
-    closed bool
+// Server 侧(OnConnect 里,Session 已注册进 SessionStore 之后)
+yamuxSess, err := pollmux.ClientSession(pollSession)
 
-    // A4:超过此值打 warn 日志(仅告警,不阻塞 —— 加阻塞语义会引入死锁风险)
-    highWaterMark int
-    warned        bool
-    onHighWater   func(n int)
-}
-
-const DefaultCoalesceWindow = 2 * time.Millisecond
-
-func NewBufferedPipe() *BufferedPipe
-func (p *BufferedPipe) Write(data []byte) (int, error)   // 追加 + cond.Signal
-func (p *BufferedPipe) Read(dst []byte) (int, error)     // 阻塞直到有数据或关闭
-func (p *BufferedPipe) Close() error                     // cond.Broadcast 唤醒所有等待者
-func (p *BufferedPipe) Buffered() int                    // 新增:供 /status 观测
-
-// ReadAvailable 是长轮询的核心原语,两阶段:
-//   阶段一:若 buf 空,最长等 timeout 等第一个字节(这是真正的长轮询等待)
-//   阶段二:拿到第一个字节后,再等一个很短的 coalesceWindow 攒更多数据(上限 len(dst))
-// 返回 (0, nil) 表示纯超时无数据(调用方应回 204);返回 io.EOF 表示已关闭且空。
-func (p *BufferedPipe) ReadAvailable(dst []byte, timeout, coalesceWindow time.Duration) (int, error)
+// Client 侧(runSession 里)
+yamuxSess, err := pollmux.ServerSession(conn)
 ```
 
-**为什么需要阶段二**:没有它的话,只要有 1 个字节落进 buf,poll 响应就立刻发出;而调用方(`pollLoop`)收到数据后会立即重新 poll —— 结果每一点点数据都要一次完整往返,`dst` 的容量永远用不满。阶段二是下行方向的写合并,与 `HTTPConn.Write` 的上行合并是同一类修复。
+`pollmux.YamuxConfig()` 已设置:
 
-### 5.2 `session.go` —— `Session`(服务端侧虚拟连接)
+- `EnableKeepAlive = false`(正确性前提,见 §7)
+- `MaxStreamWindowSize = 256KB`(yamux 地板,不可再小)
+- `KeepAliveInterval = 30s`(yamux 校验要求,keepalive 关闭时也非零)
+
+### 5.3 HttpHop 服务端:SessionStore + Hooks
 
 ```go
-type Session struct {
-    ID        string        // 随机 32 字符 hex,每次连接都不同
-    ClientID  string        // 【F】跨重连稳定的标识,来自 Client 配置
-    Subdomain string        // 由 token 决定,Client 不能自选
-
-    ToServer   *BufferedPipe // Client → Server 方向(handlePoll 写入,yamux 读出)
-    FromServer *BufferedPipe // Server → Client 方向(yamux 写入,handlePoll 读出)
-
-    LastActive   time.Time
-    pollInFlight int32      // 【A3】原子计数:>0 表示当前有 poll 挂在服务端
-
-    mu     sync.Mutex
-    closed bool
+type Server struct {
+    cfg          config.ServerConfig
+    registry     *registry.Registry      // 应用层:子域名 → TunnelPool
+    sessionStore *pollmux.SessionStore   // 传输层:session_id → Session
+    pollmuxCfg   pollmux.ServerConfig
+    hooks        pollmux.Hooks
+    auth         *TokenStore
+    proxy        *httputil.ReverseProxy
+    logger       *zap.Logger
+    // ...
 }
 
-func NewSession(id, clientID, subdomain string) *Session
-
-// io.ReadWriteCloser —— 供 yamux 直接使用
-func (s *Session) Read(p []byte) (int, error)  { return s.ToServer.Read(p) }
-func (s *Session) Write(p []byte) (int, error) { return s.FromServer.Write(p) }
-func (s *Session) Close() error                 // 关闭两个 pipe,幂等
-
-func (s *Session) Touch()
-func (s *Session) IsExpired(timeout time.Duration) bool
-
-// 【A3】poll 生命周期
-func (s *Session) BeginPoll()          // atomic.AddInt32(&pollInFlight, 1); Touch()
-func (s *Session) EndPoll()            // atomic.AddInt32(&pollInFlight, -1); Touch()
-func (s *Session) PollInFlight() int32
-```
-
-> **注意命名**:HttpBroker 里叫 `ToBroker`/`FromBroker`,这里改名为 `ToServer`/`FromServer`。方向语义不变。
-
-### 5.3 `httpconn.go` —— `HTTPConn`(客户端侧虚拟连接)
-
-这是改动最多的文件。移植 + A1 + A2 + A5 + D3 + D10。
-
-```go
-type HTTPConn struct {
-    sessionID string
-    pollURL   string        // {server}/tunnel/{id}/poll
-    deleteURL string        // {server}/tunnel/{id}
-    authToken string
-
-    // 【A1】两个独立的 http.Client
-    pollClient *http.Client // ResponseHeaderTimeout = pollTimeout + grace;整体 Timeout = 0
-    sendClient *http.Client // 整体 Timeout = sendTimeout(15s)
-
-    readPipe *BufferedPipe
-
-    transportFailedCh chan struct{}
-    transportFailOnce sync.Once
-
-    closed int32
-    stopCh chan struct{}
-    wg     sync.WaitGroup
-
-    // 写侧合并
-    writeMu             sync.Mutex
-    writeBuf            []byte
-    writeFlightOn       bool
-    writeCoalesceWindow time.Duration
-    maxSendChunk        int  // 【A2】单次发送上限,默认 512KB;遇 413 时减半
-
-    // 【D3】本地健康状态,由 client/health.go 提供,pollLoop 每次搭车上报
-    localHealth func() bool
-
-    logger *zap.Logger
-}
-```
-
-#### `Write` / `flushLoop`(A2 修复)
-
-```go
-func (c *HTTPConn) Write(p []byte) (int, error) {
-    if atomic.LoadInt32(&c.closed) == 1 { return 0, io.ErrClosedPipe }
-    if len(p) == 0 { return 0, nil }
-
-    c.writeMu.Lock()
-    c.writeBuf = append(c.writeBuf, p...)
-    if c.writeFlightOn {           // 已有 flushLoop 在跑,排队即可
-        c.writeMu.Unlock()
-        return len(p), nil
-    }
-    c.writeFlightOn = true
-    c.writeMu.Unlock()
-
-    c.wg.Add(1)
-    go c.flushLoop()
-    return len(p), nil
-}
-```
-
-> `Write` 返回即代表"已排队",不代表"对端已收到" —— 与真实 `net.Conn` 的语义一致。发送失败通过 `TransportFailed()` 异步上报。
-
-```go
-func (c *HTTPConn) flushLoop() {
-    defer c.wg.Done()
-    first := true
-    for {
-        if first {
-            // 一次突发只付一次合并窗口的代价:让紧随其后的 Write(最典型的是
-            // yamux 同一帧的 header + body 两次调用)有机会并进同一个 HTTP 请求。
-            time.Sleep(c.writeCoalesceWindow)
-            first = false
-        }
-
-        c.writeMu.Lock()
-        if len(c.writeBuf) == 0 {
-            c.writeFlightOn = false
-            c.writeMu.Unlock()
-            return
-        }
-        // 【A2】分片:每次最多取 maxSendChunk
-        n := min(len(c.writeBuf), c.maxSendChunk)
-        chunk := make([]byte, n)          // 必须复制:直接切片会让整个底层数组
-        copy(chunk, c.writeBuf[:n])       // 无法回收,长连接下是内存泄漏
-        c.writeBuf = append(c.writeBuf[:0], c.writeBuf[n:]...)
-        c.writeMu.Unlock()
-
-        if err := c.doSend(chunk); err != nil {
-            if errors.Is(err, errChunkTooLarge) {   // 413:可恢复
-                c.writeMu.Lock()
-                c.maxSendChunk = max(c.maxSendChunk/2, minSendChunk)  // 减半后重试
-                c.writeBuf = append(chunk, c.writeBuf...)             // 放回队首
-                c.writeMu.Unlock()
-                continue
-            }
-            c.logger.Error("send failed, signalling transport failure", zap.Error(err))
-            c.signalTransportFailed()
-            c.readPipe.Close()
-            c.writeMu.Lock(); c.writeFlightOn = false; c.writeMu.Unlock()
-            return
-        }
+func (s *Server) buildHooks() pollmux.Hooks {
+    return pollmux.Hooks{
+        Authenticate: s.authenticateConnect,  // token → subdomain;校验 meta["client_id"]
+        OnConnect:    s.onConnect,            // 启动 yamux、登记 ClientTunnel、预热证书
+        OnPoll:       s.onPoll,               // 处理 X-Local-Health
+        OnDisconnect: s.onDisconnect,         // 从 TunnelPool 移除
     }
 }
 ```
 
-#### `doSend`
+控制面路由挂载 pollmux handler(示例用 gorilla/mux):
 
 ```go
-func (c *HTTPConn) doSend(buf []byte) error {
-    req, _ := http.NewRequest(http.MethodPost, c.pollURL, bytes.NewReader(buf))
-    req.Header.Set("Content-Type", "application/octet-stream")
-    req.Header.Set("X-Send-Only", "true")
-    if c.authToken != "" { req.Header.Set("Authorization", "Bearer "+c.authToken) }
+mux.Handle("/tunnel/connect", pollmux.ConnectHandler(s.sessionStore, s.pollmuxCfg, s.hooks))
+mux.Handle("/tunnel/{id}/poll", pollmux.PollHandler(s.sessionStore, s.pollmuxCfg, s.hooks))
+mux.Handle("/tunnel/{id}", pollmux.DeleteHandler(s.sessionStore, s.pollmuxCfg, s.hooks))
+// SessionIDFunc 零值读 PathValue("id");mux 用户传 func(r) string { return mux.Vars(r)["id"] }
+```
 
-    resp, err := c.sendClient.Do(req)     // 【A1】短超时的 client
-    if err != nil { return fmt.Errorf("send: %w", err) }
-    defer resp.Body.Close()
-    io.Copy(io.Discard, resp.Body)
+`pollmuxCfg` 由 HttpHop 配置映射:
 
-    switch resp.StatusCode {
-    case http.StatusOK, http.StatusNoContent:
-        return nil
-    case http.StatusRequestEntityTooLarge:   // 413
-        return errChunkTooLarge              // 【A2】可恢复
-    default:
-        return fmt.Errorf("server returned status %d", resp.StatusCode)
-    }
+```go
+pollmux.ServerConfig{
+    PollTimeout:    cfg.Tunnel.PollTimeout,
+    SessionTimeout: cfg.Tunnel.SessionTimeout,
+    SweepInterval:  cfg.Tunnel.SweepInterval,
+    CoalesceWindow: cfg.Tunnel.CoalesceWindow,
+    PollBufferSize: cfg.Tunnel.PollBufferSize,
+    MaxSendBytes:   cfg.Tunnel.MaxSendBytes,
+    HighWaterWarn:  cfg.Tunnel.HighWaterWarn,
+    PollMode:       cfg.Tunnel.PollMode,
+    Logger:         slog.New(zapslog.NewHandler(logger.Core())), // nil 禁用
 }
 ```
 
-#### `pollLoop`(A1 + A5 + D3 + D10)
+会话扫描用 `pollmux.StartSweeper(st, cfg, hooks)`,驱逐时 `OnDisconnect` 清理应用层注册表。
+
+### 5.4 HttpHop 客户端:Connector + ReconnectLoop
 
 ```go
-func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
-    defer c.wg.Done()
-
-    for {
-        select {
-        case <-c.stopCh: return
-        default:
-        }
-
-        req, _ := http.NewRequest(http.MethodPost, c.pollURL, nil)
-        req.Header.Set("X-Receive-Only", "true")
-        if c.authToken != "" { req.Header.Set("Authorization", "Bearer "+c.authToken) }
-        // 【D3】健康状态搭车上报 —— 不需要额外的控制流
-        if c.localHealth != nil {
-            req.Header.Set("X-Local-Health", boolToHealth(c.localHealth()))
-        }
-
-        resp, err := c.pollClient.Do(req)   // 【A1】ResponseHeaderTimeout = pollTimeout+grace
-        if err != nil {
-            if atomic.LoadInt32(&c.closed) == 1 { return }
-            // 超时也走这里 —— 这正是 A1 想要的:静默黑洞在 ~40s 内被发现
-            c.logger.Warn("poll failed, signalling transport failure", zap.Error(err))
-            c.signalTransportFailed()
-            c.readPipe.Close()
-            return
-        }
-
-        gotData := false
-        switch resp.StatusCode {
-        case http.StatusOK:
-            data, err := io.ReadAll(resp.Body); resp.Body.Close()
-            if err != nil { continue }
-            if len(data) > 0 {
-                gotData = true
-                if _, err := c.readPipe.Write(data); err != nil { return }
-            }
-        case http.StatusNoContent:           // 204:健康的空闲超时
-            resp.Body.Close()
-        case http.StatusNotFound,            // 404:会话不存在(服务端重启/已清理)
-             http.StatusUnauthorized,        // 401:鉴权失败
-             http.StatusGone,                // 410:【A5】服务端主动关闭了会话
-             http.StatusFound:               // 302:通常是鉴权失败或误配
-            resp.Body.Close()
-            c.logger.Warn("session invalid", zap.Int("status", resp.StatusCode))
-            c.signalTransportFailed()
-            c.readPipe.Close()
-            return
-        default:
-            resp.Body.Close()
-            c.logger.Warn("unexpected status", zap.Int("status", resp.StatusCode))
-        }
-
-        // 【D10】pollInterval 默认 0:收到数据后立即重 poll,把等待留给服务端的长轮询
-        if !gotData && pollInterval > 0 {
-            if !c.sleepOrStop(pollInterval) { return }
-        }
-    }
-}
-```
-
-#### 其余方法
-
-```go
-func (c *HTTPConn) Read(p []byte) (int, error) { return c.readPipe.Read(p) }
-func (c *HTTPConn) TransportFailed() <-chan struct{}   // 传输级失败信号
-func (c *HTTPConn) Close() error                        // 停 poll、等 goroutine、DELETE 会话
-```
-
-### 5.4 `transport.go` —— 连接器
-
-```go
-type Conn interface {
-    io.ReadWriteCloser
-    TransportFailed() <-chan struct{}
+connector := &pollmux.Connector{
+    BaseURL:            cfg.Server.URL,
+    AuthToken:          cfg.Server.Token,
+    Meta:               map[string]string{"client_id": cfg.ClientID},
+    PollInterval:       cfg.Transport.PollInterval,   // 默认 0(D10)
+    PollGrace:          cfg.Transport.PollGrace,      // A1:加在服务端下发的 poll_timeout 上
+    SendTimeout:        cfg.Transport.SendTimeout,
+    CoalesceWindow:     cfg.Transport.CoalesceWindow,
+    MaxSendChunk:       cfg.Transport.MaxSendChunk,   // 实际 min(此值, limits.MaxSendBytes)
+    LocalHealth:        health.Healthy,               // D3
+    InsecureSkipVerify: cfg.Server.InsecureSkipVerify,
+    Logger:             slog.New(zapslog.NewHandler(logger.Core())),
 }
 
-type HTTPConnector struct {
-    PollInterval        time.Duration
-    PollTimeout         time.Duration   // 用于推导 ResponseHeaderTimeout
-    PollGrace           time.Duration   // 【A1】默认 10s
-    SendTimeout         time.Duration   // 【A1】默认 15s
-    WriteCoalesceWindow time.Duration
-    MaxSendChunk        int             // 【A2】默认 512KB
-    AuthToken           string
-    ClientID            string          // 【F】
-    InsecureSkipVerify  bool
-    LocalHealth         func() bool     // 【D3】
-    Logger              *zap.Logger
+loop := &pollmux.ReconnectLoop{
+    Connect: func(ctx context.Context) (pollmux.Conn, error) {
+        return connector.Connect(ctx)
+    },
+    Serve: func(ctx context.Context, conn pollmux.Conn) pollmux.Outcome {
+        sess, err := pollmux.ServerSession(conn)
+        if err != nil { return pollmux.OutcomeTransportFailed }
+        defer sess.Close()
+        return pollmux.AcceptLoop(ctx, sess, conn, handler.Handle)
+    },
+    Logger: slogLogger,
 }
-
-// Connect 发起 POST /tunnel/connect,拿到 session_id 后构造 HTTPConn 并启动 pollLoop。
-func (c *HTTPConnector) Connect(serverURL string) (Conn, error)
+return loop.Run(ctx)
 ```
 
-### 5.5 yamux 配置(两端共用的辅助函数)
+connect 成功后,客户端按服务端下发的 `limits` 自动设置 `ResponseHeaderTimeout = poll_timeout + poll_grace`(A1),并在启动时校验 `poll_interval` 不会导致被误判掉线。
 
-```go
-func YamuxConfig() *yamux.Config {
-    cfg := yamux.DefaultConfig()
-    cfg.LogOutput = io.Discard
+### 5.5 §3 缺陷在 pollmux 中的对应
 
-    // 【关键坑】必须关掉 yamux 自带的 keepalive。长轮询挂起时,PING 无法在 yamux 的
-    // ConnectionWriteTimeout(10s)内完成往返,会产生假的"连接已死"信号。
-    // 存活性完全由 pollLoop 承担(见 §7),不由 yamux 承担。
-    cfg.EnableKeepAlive = false
-
-    // 【A4】内存上限:256 流 × 64KB = 16MB / 隧道
-    cfg.MaxStreamWindowSize = 64 * 1024
-    return cfg
-}
-```
-
-**角色分配**:
-
-- **Server = `yamux.Client`** —— 主动 `Open()` 流,把每个公网请求推给 Client。
-- **Client = `yamux.Server`** —— `Accept()` 流。
-
-与 HttpBroker 处理 provider 的方式完全一致(`relay.go` 的 `HandleProvider`)。
+| 缺陷 | pollmux 中的实现 |
+|---|---|
+| A1 客户端无超时 | 独立 poll/send client;`ResponseHeaderTimeout = limits.PollTimeout + PollGrace` |
+| A2 体上限不匹配 | connect 下发 `limits.max_send_bytes`;客户端 `min()` 后分片发送 |
+| A3 服务端检测慢 | `SessionTimeout = 2×PollTimeout`;5s sweeper;`PollInFlight()` |
+| A4 无背压 | 256KB 窗口 + 高水位告警;HttpHop 用 `max_streams_per_tunnel` 限流 |
+| A5 EOF 与 204 混淆 | 会话关闭回 **410**,客户端立即重连 |
+| B1 64KB poll 缓冲 | `PollBufferSize` 可配,默认 256KB |
+| D3 本地健康 | `Connector.LocalHealth` → `X-Local-Health`;`Hooks.OnPoll` 接收 |
+| D10 poll_interval | 默认 0;过大时 connect 后自检失败 |
 
 ---
 
-## 六、隧道控制协议规范
+## 六、HttpHop 控制面约定
 
-所有端点都在**控制域名**下(如 `https://tunnel.example.com`),都要求 `Authorization: Bearer <token>`。
+wire 协议(端点路径、读写分离 header、状态码语义、`limits` 下发、`protocol_version`)由 **pollmux 定义**,详见 pollmux `protocol.go` / `DESIGN.md` §4.4。本节只描述 **HttpHop 在 pollmux 之上追加的应用语义**。
 
-### 6.1 `POST /tunnel/connect`
+### 6.1 端点与鉴权
 
-Client 注册,建立一条隧道。
+所有端点挂在**控制域名**下(如 `https://tunnel.example.com`),要求 `Authorization: Bearer <token>`。路径前缀默认 `/tunnel`,与 pollmux 一致:
 
-**请求**
+| 方法 | 路径 | pollmux handler |
+|---|---|---|
+| POST | `/tunnel/connect` | `ConnectHandler` |
+| POST | `/tunnel/{id}/poll` | `PollHandler` |
+| DELETE | `/tunnel/{id}` | `DeleteHandler` |
 
-```
-POST /tunnel/connect HTTP/1.1
-Host: tunnel.example.com
-Authorization: Bearer <token>
-Content-Type: application/json
+HttpHop 另提供 `GET /status`(§12),不走 pollmux。
 
-{"client_id": "home-gpu-01", "version": "0.1.0"}
-```
+### 6.2 connect 的 meta 映射
 
-**响应 200**
+**客户端请求体**(pollmux `ConnectRequest`):
 
 ```json
-{"session_id": "9f2c...e41a", "subdomain": "myapp", "poll_timeout": "30s"}
+{
+  "protocol_version": 1,
+  "meta": { "client_id": "home-gpu-01" }
+}
 ```
 
-> `subdomain` 由服务端根据 token 决定并回传(Client 只是知情,不能自选);`poll_timeout` 回传是为了让 Client 自己算出正确的 `ResponseHeaderTimeout`,避免两边配置漂移。
-
-**错误**:401(token 无效)、400(缺 `client_id`)、409(该子域名已达 `max_clients_per_subdomain`)。
-
-**服务端处理顺序**(顺序很重要):
+**服务端 `Hooks.Authenticate`**:
 
 ```
-1. 验证 token → 查出绑定的 subdomain
-2. 校验 client_id 非空
-3. 生成 session_id(crypto/rand 16 字节 hex)
-4. session := transport.NewSession(sessionID, clientID, subdomain)
-5. 【竞态修复】先把 session 注册进 registry,再启动 yamux goroutine。
-   HttpBroker 明确修过这个 bug(server.go:208-213):否则第一个 poll
-   可能在 goroutine 建好 yamux 之前到达,拿到 404,导致持续轮询失败。
-6. go relay.Handle(session)  →  yamux.Client(session, YamuxConfig())
-7. 【F】把 ClientTunnel 加进 TunnelPool(按 client_id 去重:同 ID 视为重连,替换旧的)
-8. 【D12】后台预热该子域名的 TLS 证书
-9. 返回 200 + JSON
+1. 校验 Bearer token → TokenStore.Lookup → 得到 subdomain、max_clients
+2. 校验 meta["client_id"] 非空;缺则 StatusErrorf(400, ...)
+3. 返回 meta 合并结果:{"subdomain": "myapp", "host_key": "myapp"}  // subdomain=host_key;apex 为 "@"
+4. 若该 subdomain 已达 max_clients → StatusErrorf(409, ...)  // 【F】
 ```
 
-### 6.2 `POST /tunnel/{id}/poll`
+**成功响应**(pollmux `ConnectResponse`,HttpHop 关心的字段):
 
-一个端点承担两种模式,由 header 区分。这是"读写分离"的实现方式,也是队头阻塞被消除的根本原因。
+```json
+{
+  "protocol_version": 1,
+  "session_id": "9f2c...e41a",
+  "limits": {
+    "max_send_bytes": 1048576,
+    "poll_timeout_ms": 30000,
+    "session_timeout_ms": 60000,
+    "poll_buffer_bytes": 262144
+  },
+  "meta": { "subdomain": "myapp" }
+}
+```
 
-| Header | 模式 | 行为 |
-|---|---|---|
-| `X-Send-Only: true` | 发送 | 把请求体写入 `ToServer`,**立即**返回 200,不等待 |
-| `X-Receive-Only: true` | 接收 | 长轮询 `FromServer`,最长等 `poll_timeout` |
+客户端从 `meta["subdomain"]` 得知分配的子域名;传输参数以 **`limits`** 为权威,不再依赖本地 `poll_timeout` 与服务端配置对齐。
 
-**其他可选 header**:`X-Local-Health: ok | down`(D3,搭车上报本地健康)。
+### 6.3 `Hooks.OnConnect` 处理顺序
 
-**响应**
+pollmux 保证:**先**把 `Session` 注册进 `SessionStore`,**再**调 `OnConnect`(修复 HttpBroker 的预注册竞态)。HttpHop 在 `OnConnect` 内:
 
-| 状态码 | 含义 | Body |
-|---|---|---|
-| 200 | 有数据(接收模式)/ 发送成功(发送模式) | `application/octet-stream` 数据 / 空 |
-| 204 | 长轮询超时,无数据。**正常心跳信号** | 空 |
-| 401 | token 无效 | JSON |
-| 404 | 会话不存在(服务端重启/已被清理) | JSON |
-| **410** | **【A5】服务端主动关闭了会话,Client 应立即重连** | JSON |
-| **413** | **【A2】请求体超过上限,Client 应缩小分片重试** | JSON |
+```
+1. yamuxSess := pollmux.ClientSession(session)
+2. tun := &ClientTunnel{ID: meta["client_id"], Subdomain: meta["subdomain"], Session: session, Yamux: yamuxSess, ...}
+3. registry.Register(tun, maxClients)  // 同 client_id 视为重连 → 替换
+4. go acceptYamuxStreams(yamuxSess, tun)  // Server 侧通常只需等 yamux 关闭;公网请求通过 Open() 推流
+5. warmCert(subdomain)                    // 【D12】
+6. 返回 nil
+```
 
-**服务端 `handlePoll` 伪代码**:
+### 6.4 poll 搭车:`X-Local-Health`
+
+pollmux 不解释此头,在 `Hooks.OnPoll` 里交给 HttpHop:
 
 ```go
-func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
-    sessionID := mux.Vars(r)["id"]
-    session, ok := s.registry.GetSession(sessionID)
-    if !ok { writeError(w, 404, "session not found"); return }
-
-    session.BeginPoll()          // 【A3】
-    defer session.EndPoll()
-
-    // 【D3】搭车上报的健康状态
-    if h := r.Header.Get("X-Local-Health"); h != "" {
-        s.registry.SetLocalHealth(session.Subdomain, session.ClientID, h == "ok")
-    }
-
-    // 【A2】上限 = max_send_chunk × 2
-    data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBody))
-    if err != nil {
-        var mbe *http.MaxBytesError
-        if errors.As(err, &mbe) { writeError(w, 413, "request body too large"); return }
-        writeError(w, 400, "failed to read body"); return
-    }
-    if len(data) > 0 { session.ToServer.Write(data) }
-
-    if r.Header.Get("X-Send-Only") == "true" {
-        w.WriteHeader(200)       // 发送模式:立即返回,绝不等待
-        return
-    }
-
-    // 接收模式:长轮询
-    buf := s.bufPool.Get().([]byte)          // 【B1】sync.Pool 复用 poll_buffer_size 大小的缓冲
-    defer s.bufPool.Put(buf)
-
-    n, err := session.FromServer.ReadAvailable(buf, s.cfg.PollTimeout, s.cfg.CoalesceWindow)
-    switch {
-    case n > 0:
-        w.Header().Set("Content-Type", "application/octet-stream")
-        w.WriteHeader(200)
-        w.Write(buf[:n])
-    case err == io.EOF:
-        writeError(w, 410, "session closed")  // 【A5】不是 204!
-    default:
-        w.WriteHeader(204)                    // 正常的空闲心跳
+func (s *Server) onPoll(session *pollmux.Session, r *http.Request) {
+    if h := r.Header.Get(pollmux.HeaderLocalHealth); h != "" {
+        sub := session.Meta()["subdomain"]
+        cid := session.Meta()["client_id"]
+        s.registry.SetLocalHealth(sub, cid, h == "ok")
     }
 }
 ```
 
-### 6.3 `DELETE /tunnel/{id}`
+读写分离(`X-Send-Only` / `X-Receive-Only`)、长轮询 204 心跳、410 会话关闭、413 协议违规等语义均由 pollmux `PollHandler` 实现,HttpHop 无需重写。
 
-Client 干净下线。关闭 `Session`(两个 pipe 关闭 → yamux 收到 EOF → 会话关闭 → 注册表驱逐)。响应 200 / 404。
+### 6.5 `Hooks.OnDisconnect`
 
-### 6.4 `GET /status`
+传输会话关闭或被 sweeper 驱逐时调用。HttpHop 从 `TunnelPool` 移除对应 `ClientTunnel`,关闭 yamux(若仍存活)。`reason` 区分客户端 DELETE、服务端停机、超时驱逐等。
 
-见 §12。可通过配置关闭(默认关闭)。
-
-### 6.5 时序图
+### 6.6 时序图
 
 **正常请求转发**
 
@@ -780,7 +674,7 @@ Client 干净下线。关闭 `Session`(两个 pipe 关闭 → yamux 收到 EOF �
  │          │                                   │                  │
  │          │◀────── poll(挂起,等 30s) ────────│                  │
  │─请求────▶│                                   │                  │
- │          │ yamux.Open() → FromServer.Write   │                  │
+ │          │ yamux.Open() → session.Write      │                  │
  │          │──── 200 + 数据 ──────────────────▶│                  │
  │          │◀───── poll(立即重发) ────────────│  yamux.Accept()  │
  │          │                                   │──── dial ───────▶│
@@ -792,25 +686,25 @@ Client 干净下线。关闭 `Session`(两个 pipe 关闭 → yamux 收到 EOF �
 **空闲心跳**
 
 ```
-Client                     Server
-  │──── poll ──────────────▶│  ReadAvailable 阻塞 30s
+Client                     Server (pollmux PollHandler)
+  │──── poll ──────────────▶│  ReadAvailable 阻塞 poll_timeout
   │                         │
   │◀─────── 204 ────────────│  超时,无数据
-  │──── poll(立即) ───────▶│  ← 服务端据此更新 LastActive,确认 Client 存活
+  │──── poll(立即) ───────▶│  LastActive / PollInFlight 更新
 ```
 
 **Client 掉线的两种情形**
 
 ```
 情形一(有 TCP FIN/RST,如 kill 进程):
-  Server: 挂起的 poll 立即返回错误 → pollInFlight 归零 → 【瞬时感知】
-          清理 goroutine(5s 一跳)在 session_timeout(60s)后驱逐
+  Server: 挂起的 poll 立即返回 → PollInFlight 归零 → 【瞬时感知】
+          sweeper 在 session_timeout(60s) 后 OnDisconnect 驱逐
 
 情形二(静默黑洞,如拔网线 / iptables DROP):
-  Client: pollClient 在 poll_timeout+grace(40s)后超时
-          → signalTransportFailed → 关闭会话 → 退避重连
-  Server: 挂起的 poll 一直挂着,直到 TCP 自身超时;
-          LastActive 停止更新 → 60s 后被清理 goroutine 驱逐
+  Client: pollClient 在 poll_timeout+grace(40s) 后超时
+          → TransportFailed → 退避重连
+  Server: 挂起的 poll 一直挂着,直到 TCP 超时;
+          LastActive 停止更新 → 60s 后 sweeper 驱逐
 ```
 
 ---
@@ -821,13 +715,13 @@ Client                     Server
 
 | 层 | 机制 | 检测延迟 | 覆盖的失效 |
 |---|---|---|---|
-| **1. 客户端自检** | `pollLoop` 本身就是持续的出站探针。任何请求失败(连接拒绝、TLS 失败、非 2xx、**A1 的响应头超时**)都在 poll goroutine 内同步暴露 → `signalTransportFailed()` → 拆会话 → 退避重连 | 快速失败:**秒级**<br>静默黑洞:**≈40s**(A1) | 网络中断、服务端重启、会话失效 |
-| **2. 服务端自检** | 每次 poll 更新 `LastActive` 并维护 `pollInFlight`。健康 Client 保证每 `poll_timeout` 至少来一次 poll | 有 TCP FIN/RST:**接近瞬时**(A3 的 `pollInFlight`)<br>其他:**≤60s**(`session_timeout`,5s 扫描粒度) | Client 进程被杀、掉电、单向不通 |
+| **1. 客户端自检** | pollmux `pollLoop` 是持续的出站探针。任何请求失败(连接拒绝、TLS 失败、非 2xx、**A1 的响应头超时**)→ `TransportFailed()` → 退避重连 | 快速失败:**秒级**<br>静默黑洞:**≈40s**(A1) | 网络中断、服务端重启、会话失效 |
+| **2. 服务端自检** | pollmux 每次 poll 更新 `LastActive` 并维护 `PollInFlight()`。健康 Client 保证每 `poll_timeout` 至少来一次 poll | 有 TCP FIN/RST:**接近瞬时**(A3)<br>其他:**≤60s**(`session_timeout`,5s sweeper) | Client 进程被杀、掉电、单向不通 |
 | **3. 本地服务健康** | Client 每 15s 探测本地目标,结果搭车在 `X-Local-Health` 上报;不健康时服务端对该子域名直接返回 503 | **≈15s**(D3) | **隧道通但内网服务本身挂了** |
 
 **为什么这三层缺一不可**:第 1 层保护的是客户端自身(它需要知道何时重连);第 2 层保护的是服务端(它需要知道何时停止把请求送进死路);第 3 层保护的是端到端可用性(前两层都健康但服务不可用)。
 
-**关键坑(必须遵守)**:yamux 自带 keepalive 必须在两端都关掉(`EnableKeepAlive = false`)。长轮询挂起时 PING 无法在 yamux 的 `ConnectionWriteTimeout`(10s)内完成往返,会产生**假的"连接已死"信号**。这条在 `HttpBroker/internal/broker/relay.go` 有明确注释,不要在实现时"顺手打开"。
+**关键坑(必须遵守)**:yamux 自带 keepalive 必须在两端都关掉。pollmux `YamuxConfig()` / `ClientSession()` / `ServerSession()` 已封装此约束 —— **不要绕过它们自行建 yamux 会话**。长轮询挂起时 PING 无法在 yamux 的 `ConnectionWriteTimeout`(10s)内完成往返,会产生假的"连接已死"信号。
 
 ---
 
@@ -840,7 +734,7 @@ Client                     Server
 type ClientTunnel struct {
     ID          string        // 【F】跨重连稳定,来自 Client 配置的 client_id
     Subdomain   string
-    Session     *transport.Session
+    Session     *pollmux.Session   // 传输层会话;PollInFlight/LastActive 从这里读
     Yamux       *yamux.Session
     ConnectedAt time.Time
     RemoteAddr  string
@@ -849,24 +743,25 @@ type ClientTunnel struct {
     ActiveStreams atomic.Int64  // 【D6】并发流计数
 }
 
-func (t *ClientTunnel) Alive() bool     // yamux 未关闭 && session 未过期
+func (t *ClientTunnel) Alive() bool     // yamux 未关闭 && Session 仍存活
 func (t *ClientTunnel) Close() error
 
 type Registry struct {
-    mu       sync.RWMutex
-    byName   map[string]*TunnelPool     // 【F】子域名 → 后端池
-    bySession map[string]*transport.Session  // session_id → Session,供 handlePoll 快速查找
+    mu      sync.RWMutex
+    byName  map[string]*TunnelPool   // 【F】子域名 → 后端池
+    bySess  map[string]*ClientTunnel // session_id → ClientTunnel,供 /status 与 OnPoll 快速查找
 }
 
 func (r *Registry) Register(t *ClientTunnel, maxPerSubdomain int) error  // 409 时返回 ErrPoolFull
-func (r *Registry) GetSession(id string) (*transport.Session, bool)
+func (r *Registry) GetBySessionID(id string) (*ClientTunnel, bool)
 func (r *Registry) Pool(subdomain string) (*TunnelPool, bool)
 func (r *Registry) Subdomains() []string                 // 供 autocert HostPolicy
 func (r *Registry) SetLocalHealth(sub, clientID string, ok bool)
-func (r *Registry) Remove(sessionID string)
-func (r *Registry) Sweep(timeout time.Duration) int       // 【A3】5s 一跳,返回驱逐数
+func (r *Registry) RemoveBySessionID(sessionID string)
 func (r *Registry) Snapshot() []TunnelStatus              // 【D9】供 /status
 ```
+
+> 传输层会话过期扫描由 **`pollmux.StartSweeper`** 负责,驱逐时 `Hooks.OnDisconnect` 调用 `Registry.RemoveBySessionID`。应用层 Registry **不再**实现独立的 `Sweep`。
 
 ```go
 // pool.go —— 【F】LB 结构预留
@@ -892,49 +787,72 @@ type firstAvailable struct{}
 // 后续实现(不在 MVP):roundRobin / leastConn / consistentHash / stickyCookie
 ```
 
-### 8.2 `internal/router/host.go`
+### 8.2 `internal/router/` —— Host 与路径路由
 
 ```go
-// Subdomain 从 Host 头解析子域名。
-//   "myapp.httphop.io:443" + root "httphop.io"  →  "myapp", nil
-//   "httphop.io"                                 →  "", ErrNoSubdomain
-//   "evil.com"                                   →  "", ErrRootMismatch
-//   "a.b.httphop.io"                             →  "", ErrNestedSubdomain(MVP 只支持单层)
-func Subdomain(host, rootDomain string) (string, error)
+// host.go
+// HostKey 从 Host 头解析路由组键。
+//   "myapp.builderrors.com:443" + root "builderrors.com"  →  "myapp", nil
+//   "builderrors.com"                                         →  "@", nil
+//   "evil.com"                                                →  "", ErrRootMismatch
+//   "a.b.builderrors.com"                                     →  "", ErrNestedSubdomain
+func HostKey(host, rootDomain string) (string, error)
 
-// HostPolicy 返回给 autocert 的回调:只允许控制域名 + 当前已注册的子域名申请证书。
-// autocert 不支持通配符/DNS-01,所以必须逐域名签发。
 func HostPolicy(reg *registry.Registry, root, controlHost string) autocert.HostPolicy
+// 除 controlHost 外,为每个已注册 HostKey 签发:子域名 FQDN;键 "@" 时含 apex root。
 ```
 
-> **附带好处**:逐域名单证书意味着每张证书只覆盖一个名字,浏览器不会跨子域名做连接合并 —— 顺带消除了 C2 那类风险的残余。
+```go
+// route.go —— §3.G
+type PathRewrite struct {
+    StripPrefix string // 非空则已从 Path 去掉此前缀
+}
+
+func StripPathPrefix(path, prefix string) (newPath string, ok bool)
+
+type Route struct {
+    HostKey    string
+    PathPrefix string
+    Strip      bool
+    Pool       *registry.TunnelPool
+}
+
+type RouteTable struct { /* compiled from bindings + registry */ }
+
+func NewRouteTable(bindings []config.TunnelBinding, reg *registry.Registry) (*RouteTable, error)
+func (t *RouteTable) Match(hostKey, path string) (*Route, error) // 最长前缀;兜底 PathPrefix==""
+func (t *RouteTable) Validate() error // 启动时:重复键、前缀冲突
+```
 
 ### 8.3 `internal/server/server.go` —— 控制面
 
 ```go
 type Server struct {
-    cfg      config.ServerConfig
-    registry *registry.Registry
-    auth     *TokenStore
-    proxy    *httputil.ReverseProxy
-    bufPool  sync.Pool          // 【B1】poll_buffer_size 大小的 []byte
-    logger   *zap.Logger
-    done     chan struct{}
-    stopOnce sync.Once
+    cfg          config.ServerConfig
+    registry     *registry.Registry
+    sessionStore *pollmux.SessionStore
+    routes       *router.RouteTable       // §3.G 编译自 tunnels + registry
+    pollmuxCfg   pollmux.ServerConfig
+    hooks        pollmux.Hooks
+    auth         *TokenStore
+    proxy        *httputil.ReverseProxy
+    stopSweeper  func()              // pollmux.StartSweeper 返回
+    logger       *zap.Logger
+    done         chan struct{}
+    stopOnce     sync.Once
 }
 
 func NewServer(cfg, logger) *Server
-func (s *Server) Start() error          // 起 :80 和 :443,起 sweepLoop
+func (s *Server) Start() error          // 起 :80 和 :443、挂载 pollmux handler、StartSweeper
 func (s *Server) Stop(ctx) error        // 优雅停机(顺序见下)
 
-// 控制面 handler
-func (s *Server) handleConnect(w, r)    // §6.1
-func (s *Server) handlePoll(w, r)       // §6.2
-func (s *Server) handleDelete(w, r)     // §6.3
-func (s *Server) handleStatus(w, r)     // §6.4
+func (s *Server) handleStatus(w, r)     // §12,HttpHop 自有
 
-// 【A3】5 秒一跳的清理循环
-func (s *Server) sweepLoop()
+// pollmux Hooks 实现(§6)
+func (s *Server) authenticateConnect(r, req) (meta, error)
+func (s *Server) onConnect(session, meta) error
+func (s *Server) onPoll(session, r)
+func (s *Server) onDisconnect(session, reason)
 ```
 
 **顶层 handler 的 Host 分流(D5)**:
@@ -949,40 +867,49 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-**优雅停机顺序**(照抄 HttpBroker `server.go:141-161` 的做法):
+**优雅停机顺序**:
 
 ```
 1. httpSrv.Shutdown(ctx) —— 停止接受新连接,在途请求排空
-2. 关闭所有 Session —— pipe 关闭 → yamux 收到 EOF → 关闭 →
-   客户端的 poll 拿到 410(A5)→ 立即进入重连,而不是空转到超时
-3. close(s.done) 停掉 sweepLoop
+2. 对每个 pollmux.Session 调 pollmux.CloseSession(store, hooks, s, ReasonServerClose)
+   → pipe 关闭 → 客户端 poll 拿到 410(A5) → 立即重连
+3. stopSweeper(); close(s.done)
 ```
 
 ### 8.4 `internal/server/proxy.go` —— 公网请求处理
 
-**关键设计**:**在外层 handler 里做查找和检查**(这样能返回准确的 404/503),**只把选中的 tunnel 塞进 context**;`Rewrite` 只负责 header,`DialContext` 只负责开流。
+**关键设计**:**在外层 handler 里做 Host+Path 路由与健康检查**,把 `tunnel` 与路径改写规则塞进 context;`Rewrite` 执行 URI 改写 + XFF;`DialContext` 开流。
 
 ```go
 type ctxKey struct{}
 
+type proxyCtx struct {
+    tunnel *registry.ClientTunnel
+    strip  string // 非空:Rewrite 时去掉此前缀
+}
+
 func (s *Server) servePublic(w http.ResponseWriter, r *http.Request) {
-    sub, err := router.Subdomain(r.Host, s.cfg.RootDomain)
+    hostKey, err := router.HostKey(r.Host, s.cfg.RootDomain)
     if err != nil { writeHTTPError(w, 400, "invalid host"); return }
 
-    pool, ok := s.registry.Pool(sub)
-    if !ok { writeHTTPError(w, 404, "tunnel not registered"); return }
+    route, err := s.routes.Match(hostKey, r.URL.Path)
+    if err != nil { writeHTTPError(w, 404, "no route for host/path"); return }
 
-    tun, ok := pool.Pick(r)
+    tun, ok := route.Pool.Pick(r)
     if !ok { writeHTTPError(w, 503, "no available backend"); return }
 
     if !tun.LocalHealthy.Load() {
-        writeHTTPError(w, 503, "backend local service unhealthy"); return   // 【D3】
+        writeHTTPError(w, 503, "backend local service unhealthy"); return
     }
-    if tun.ActiveStreams.Load() >= int64(s.cfg.MaxStreamsPerTunnel) {
-        writeHTTPError(w, 503, "tunnel stream limit reached"); return       // 【D6】
+    if tun.ActiveStreams.Load() >= int64(s.cfg.Tunnel.MaxStreamsPerTunnel) {
+        writeHTTPError(w, 503, "tunnel stream limit reached"); return
     }
 
-    r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, tun))
+    pctx := proxyCtx{tunnel: tun}
+    if route.Strip && route.PathPrefix != "" {
+        pctx.strip = route.PathPrefix
+    }
+    r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, pctx))
     s.proxy.ServeHTTP(w, r)
 }
 
@@ -990,26 +917,33 @@ func (s *Server) newProxy() *httputil.ReverseProxy {
     return &httputil.ReverseProxy{
         Rewrite: func(pr *httputil.ProxyRequest) {
             pr.Out.URL.Scheme = "http"
-            pr.Out.URL.Host   = "tunnel"        // 占位,DialContext 忽略它
-            pr.Out.Host       = pr.In.Host      // 保持原始 Host 传给内网服务
-            pr.SetXForwarded()                  // 【D1】注入 XFF/XFP/XFH 并清空伪造值
+            pr.Out.URL.Host   = "tunnel"
+            pr.Out.Host       = pr.In.Host
+            if pctx, ok := pr.In.Context().Value(ctxKey{}).(proxyCtx); ok && pctx.strip != "" {
+                if stripped, ok := router.StripPathPrefix(pr.Out.URL.Path, pctx.strip); ok {
+                    pr.Out.URL.Path = stripped
+                }
+            }
+            pr.SetXForwarded()
         },
         Transport: &http.Transport{
             DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-                tun, _ := ctx.Value(ctxKey{}).(*registry.ClientTunnel)
-                if tun == nil { return nil, errNoTunnel }
-                return bridge.OpenStream(tun)   // §8.5
+                pctx, _ := ctx.Value(ctxKey{}).(proxyCtx)
+                if pctx.tunnel == nil { return nil, errNoTunnel }
+                return bridge.OpenStream(pctx.tunnel)
             },
-            DisableKeepAlives:     true,   // 一请求一流;复用由 yamux 承担
-            ForceAttemptHTTP2:     false,  // 隧道内固定 HTTP/1.1
-            ResponseHeaderTimeout: s.cfg.ResponseHeaderTimeout,  // 【D7】60s,只管响应头
+            DisableKeepAlives:     true,
+            ForceAttemptHTTP2:     false,
+            ResponseHeaderTimeout: s.cfg.Proxy.ResponseHeaderTimeout,
         },
-        FlushInterval: -1,                 // 【C】SSE/流式立即刷出,不设会被缓冲
+        FlushInterval: -1,
         ErrorHandler:  s.proxyErrorHandler,
         ErrorLog:      zap.NewStdLog(s.logger),
     }
 }
+```
 
+```go
 func (s *Server) proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
     switch {
     case errors.Is(err, context.DeadlineExceeded): writeHTTPError(w, 504, "backend timeout")
@@ -1044,9 +978,11 @@ func Bridge(a, b net.Conn) error
 
 ```go
 type TunnelBinding struct {
-    Subdomain  string
-    Token      string
-    MaxClients int    // 【F】默认 1
+    Subdomain   string
+    PathPrefix  string
+    StripPrefix bool
+    Token       string
+    MaxClients  int    // 【F】默认 1
 }
 
 type TokenStore struct {
@@ -1085,9 +1021,9 @@ func (s *Server) warmCert(subdomain string)
 
 ## 九、客户端详细设计
 
-### 9.1 `internal/client/client.go` —— 重连与 Accept 循环
+### 9.1 `internal/client/client.go` —— ReconnectLoop + AcceptLoop
 
-改编自 `HttpBroker/internal/provider/client.go`。
+使用 pollmux 的 `ReconnectLoop` 与 `AcceptLoop`,不再手写退避与四路 select。
 
 ```go
 type Client struct {
@@ -1097,79 +1033,48 @@ type Client struct {
     logger  *zap.Logger
 }
 
-// Run 连接服务端并持续接受流;断线后指数退避重连(1s → 3min,翻倍,成功后重置)。
-// 阻塞直到 ctx 取消。
+// Run 阻塞直到 ctx 取消。传输层重连由 pollmux.ReconnectLoop 驱动。
 func (c *Client) Run(ctx context.Context) error {
-    const initialBackoff, maxBackoff = 1 * time.Second, 3 * time.Minute
-    backoff := initialBackoff
-
     go c.health.Run(ctx)          // 【D3】健康检查独立于隧道生命周期常驻
 
-    for {
-        if ctx.Err() != nil { return ctx.Err() }
+    slogLogger := slog.New(zapslog.NewHandler(c.logger.Core()))
+    connector := c.buildConnector(slogLogger)
 
-        connector := &transport.HTTPConnector{
-            PollInterval:        c.cfg.Transport.PollInterval,   // 【D10】默认 0
-            PollTimeout:         c.cfg.Transport.PollTimeout,
-            PollGrace:           c.cfg.Transport.PollGrace,      // 【A1】
-            SendTimeout:         c.cfg.Transport.SendTimeout,    // 【A1】
-            WriteCoalesceWindow: c.cfg.Transport.CoalesceWindow,
-            MaxSendChunk:        c.cfg.Transport.MaxSendChunk,   // 【A2】
-            AuthToken:           c.cfg.Server.Token,
-            ClientID:            c.cfg.ClientID,                 // 【F】
-            LocalHealth:         c.health.Healthy,               // 【D3】
-            Logger:              c.logger,
-        }
-
-        conn, err := connector.Connect(c.cfg.Server.URL)
-        if err != nil {
-            c.logger.Error("connect failed, will retry", zap.Error(err), zap.Duration("in", backoff))
-            if !sleepOrDone(ctx, backoff) { return ctx.Err() }
-            backoff = min(backoff*2, maxBackoff)
-            continue
-        }
-
-        backoff = initialBackoff        // 连上了就重置退避
-        c.runSession(ctx, conn)          // 阻塞直到断线或 ctx 取消
-        conn.Close()
-
-        if ctx.Err() != nil { return ctx.Err() }
-        c.logger.Warn("connection lost, reconnecting", zap.Duration("in", backoff))
-        if !sleepOrDone(ctx, backoff) { return ctx.Err() }
-        backoff = min(backoff*2, maxBackoff)
+    loop := &pollmux.ReconnectLoop{
+        Connect: func(ctx context.Context) (pollmux.Conn, error) {
+            return connector.Connect(ctx)
+        },
+        Serve: c.serveSession,
+        Logger: slogLogger,
     }
+    return loop.Run(ctx)
 }
 
-func (c *Client) runSession(ctx context.Context, conn transport.Conn) {
-    sess, err := yamux.Server(conn, transport.YamuxConfig())   // Client 是 yamux.Server
-    if err != nil { return }
+func (c *Client) serveSession(ctx context.Context, conn pollmux.Conn) pollmux.Outcome {
+    sess, err := pollmux.ServerSession(conn)
+    if err != nil { return pollmux.OutcomeTransportFailed }
     defer sess.Close()
-    c.acceptStreams(ctx, sess, conn)
+    return pollmux.AcceptLoop(ctx, sess, conn, c.handler.Handle)
 }
 
-// acceptStreams 同时监听四个退出条件 —— 缺任何一个都会导致重连不及时。
-func (c *Client) acceptStreams(ctx context.Context, sess *yamux.Session, conn transport.Conn) {
-    acceptCh := make(chan acceptResult, 1)
-    go func() {
-        for {
-            stream, err := sess.Accept()
-            acceptCh <- acceptResult{stream, err}
-            if err != nil { return }
-        }
-    }()
-
-    for {
-        select {
-        case <-ctx.Done():               return   // 进程退出
-        case <-conn.TransportFailed():   return   // 【A1/A5】传输层失败 → 重连
-        case <-sess.CloseChan():         return   // yamux 会话关闭
-        case res := <-acceptCh:
-            if res.err != nil { return }
-            go c.handler.Handle(res.stream)
-        }
+func (c *Client) buildConnector(logger *slog.Logger) *pollmux.Connector {
+    return &pollmux.Connector{
+        BaseURL:            c.cfg.Server.URL,
+        AuthToken:          c.cfg.Server.Token,
+        Meta:               map[string]string{"client_id": c.cfg.ClientID},
+        PollInterval:       c.cfg.Transport.PollInterval,
+        PollGrace:          c.cfg.Transport.PollGrace,
+        SendTimeout:        c.cfg.Transport.SendTimeout,
+        CoalesceWindow:     c.cfg.Transport.CoalesceWindow,
+        MaxSendChunk:       c.cfg.Transport.MaxSendChunk,
+        LocalHealth:        c.health.Healthy,
+        InsecureSkipVerify: c.cfg.Server.InsecureSkipVerify,
+        Logger:             logger,
     }
 }
 ```
+
+> `AcceptLoop` 同时监听 ctx 取消、`TransportFailed()`、yamux `CloseChan`、Accept 错误 —— 缺任何一个都会导致重连不及时。`OutcomePeerClosed` 与 `OutcomeTransportFailed` 决定退避策略(见 pollmux `reconnect.go`)。
 
 ### 9.2 `internal/client/handler.go` —— 转发到本地服务
 
@@ -1235,7 +1140,7 @@ func (c *Checker) Run(ctx context.Context) {
 func (c *Checker) probe()
 ```
 
-结果通过 `HTTPConnector.LocalHealth` 传给 `HTTPConn`,由 `pollLoop` 搭车在 `X-Local-Health` 头上报 —— **不需要额外的控制流或控制协议**,因为 poll 请求本来就每 `poll_timeout` 至少来一次。
+结果通过 `pollmux.Connector.LocalHealth` 传给 pollmux 客户端,由 poll 搭车在 `X-Local-Health` 头上报 —— **不需要额外的控制流或控制协议**,因为 poll 请求本来就每 `poll_timeout` 至少来一次。
 
 ---
 
@@ -1260,14 +1165,15 @@ type ServerConfig struct {
 }
 
 type TunnelConfig struct {
-    PollTimeout    time.Duration `mapstructure:"poll_timeout"`     // 30s
+    PollTimeout    time.Duration `mapstructure:"poll_timeout"`     // 30s → pollmux ServerConfig
     SessionTimeout time.Duration `mapstructure:"session_timeout"`  // 【A3】60s
     SweepInterval  time.Duration `mapstructure:"sweep_interval"`   // 【A3】5s
     CoalesceWindow time.Duration `mapstructure:"coalesce_window"`  // 2ms
     PollBufferSize int           `mapstructure:"poll_buffer_size"` // 【B1】262144
-    MaxRequestBody int           `mapstructure:"max_request_body"` // 【A2】1048576
+    MaxSendBytes   int           `mapstructure:"max_send_bytes"`   // 【A2】1048576,connect 时下发给客户端
+    HighWaterWarn  int           `mapstructure:"high_water_warn"`  // BufferedPipe 高水位告警,0=禁用
     PollMode       string        `mapstructure:"poll_mode"`        // 【B1】"batch";"stream" 未实现
-    MaxStreamsPerTunnel int      `mapstructure:"max_streams_per_tunnel"` // 【A4/D6】256
+    MaxStreamsPerTunnel int      `mapstructure:"max_streams_per_tunnel"` // 【D6】256,应用层限流
 }
 
 type ProxyConfig struct {
@@ -1277,9 +1183,11 @@ type ProxyConfig struct {
 }
 
 type TunnelBinding struct {
-    Subdomain  string `mapstructure:"subdomain"`
-    Token      string `mapstructure:"token"`
-    MaxClients int    `mapstructure:"max_clients"`   // 【F】默认 1
+    Subdomain   string // "myapp" 或 "@" (apex)
+    PathPrefix  string `mapstructure:"path_prefix"`  // 默认 "" = 该 Host 兜底
+    StripPrefix bool   `mapstructure:"strip_prefix"` // 默认 false
+    Token       string
+    MaxClients  int    `mapstructure:"max_clients"`   // 【F】默认 1
 }
 
 // ===== 客户端 =====
@@ -1305,12 +1213,11 @@ type LocalConfig struct {
 
 type TransportConfig struct {
     PollInterval   time.Duration `mapstructure:"poll_interval"`    // 【D10】0
-    PollTimeout    time.Duration `mapstructure:"poll_timeout"`     // 30s(可由 connect 响应覆盖)
-    PollGrace      time.Duration `mapstructure:"poll_grace"`       // 【A1】10s
+    PollGrace      time.Duration `mapstructure:"poll_grace"`       // 【A1】10s,加在服务端下发的 poll_timeout 上
     SendTimeout    time.Duration `mapstructure:"send_timeout"`     // 【A1】15s
-    DialTimeout    time.Duration `mapstructure:"dial_timeout"`     // 10s
+    DialTimeout    time.Duration `mapstructure:"dial_timeout"`     // 10s,拨本地服务用
     CoalesceWindow time.Duration `mapstructure:"coalesce_window"`  // 2ms
-    MaxSendChunk   int           `mapstructure:"max_send_chunk"`   // 【A2】524288
+    MaxSendChunk   int           `mapstructure:"max_send_chunk"`   // 【A2】524288;实际 min(此值, limits.max_send_bytes)
 }
 
 type HealthConfig struct {
@@ -1322,13 +1229,15 @@ type HealthConfig struct {
 }
 ```
 
+> 客户端**不再**配置 `poll_timeout` / `session_timeout` —— 由 connect 响应的 `limits` 下发。pollmux 在 connect 后自检 `poll_interval` 是否会导致误判掉线。
+
 **配置校验**(启动时执行,失败直接退出并给出可操作的提示):
 
 - `client_id` 非空;`root_domain` / `control_host` 非空且 `control_host` 以 `root_domain` 结尾。
-- `session_timeout ≥ poll_timeout × 2`,否则健康 Client 会被误判掉线 —— **这是最容易配错的一项,必须校验并给出明确报错**。
-- `max_request_body ≥ max_send_chunk × 2`(A2)。
-- `poll_mode == "batch"`,否则报"stream 模式尚未实现"。
-- `tunnels` 里 subdomain 不重复、token 不重复且长度 ≥ 32。
+- `session_timeout ≥ poll_timeout × 2`,否则健康 Client 会被误判掉线 —— **这是最容易配错的一项,必须校验并给出明确报错**(映射到 `pollmux.ServerConfig`)。
+- `poll_mode == "batch"`(或空),否则报"stream 模式尚未实现"。
+- `tunnels` 里 token 不重复且长度 ≥ 32;`(subdomain, path_prefix)` 不重复;路径前缀冲突校验(§3.G)。
+- `path_prefix` 若非空,必须以 `/` 开头;`subdomain: "@"` 时须已配置 apex 证书需求。
 
 ### 10.2 `configs/server.example.yaml`
 
@@ -1348,9 +1257,10 @@ tunnel:
   sweep_interval:  5s
   coalesce_window: 2ms
   poll_buffer_size: 262144    # 256KB。加大可提升下行吞吐(约 buf/RTT)
-  max_request_body: 1048576   # 1MB,必须 ≥ 客户端 max_send_chunk × 2
+  max_send_bytes:   1048576   # connect 时下发;客户端 max_send_chunk 不得超过此值
+  high_water_warn:  0         # 0=禁用;可设如 4194304(4MB) 打告警
   poll_mode: "batch"          # "stream" 尚未实现
-  max_streams_per_tunnel: 256
+  max_streams_per_tunnel: 256 # 应用层并发流上限(D6)
 
 proxy:
   response_header_timeout: 60s  # 只约束响应头阶段,不影响 SSE/WebSocket/大文件
@@ -1358,11 +1268,23 @@ proxy:
   max_header_bytes:        65536
 
 tunnels:
-  - subdomain: "myapp"
+  # --- 场景: builderrors.com/service/* → 内网 /* ---
+  - subdomain: "@"
+    path_prefix: "/service"
+    strip_prefix: true
     token: "REPLACE_WITH_32B_RANDOM_TOKEN_AAAA"
-    max_clients: 1            # >1 即开启多后端(LB 策略尚未实现)
-  - subdomain: "api"
+    max_clients: 1
+
+  # --- 场景: 独立子域名,路径原样转发 ---
+  - subdomain: "myapp"
     token: "REPLACE_WITH_32B_RANDOM_TOKEN_BBBB"
+    max_clients: 1
+
+  # --- 同 Host 多前缀(可选): 最长前缀优先 ---
+  # - subdomain: "@"
+  #   path_prefix: "/api"
+  #   strip_prefix: true
+  #   token: "..."
 
 status:
   enabled: false              # 默认关闭
@@ -1387,13 +1309,12 @@ local:
   host_header_rewrite: ""     # 空 = 把公网请求的原始 Host 原样传给本地服务
 
 transport:
-  poll_interval:   0s         # 0 = 收到响应立即重发,等待交给服务端的长轮询
-  poll_timeout:    30s
-  poll_grace:      10s        # ResponseHeaderTimeout = poll_timeout + poll_grace
+  poll_interval:   0s         # 0 = 收到响应立即重发;须满足 pollmux 启动自检
+  poll_grace:      10s        # ResponseHeaderTimeout = limits.poll_timeout + poll_grace
   send_timeout:    15s
   dial_timeout:    10s
   coalesce_window: 2ms
-  max_send_chunk:  524288     # 512KB
+  max_send_chunk:  524288     # 512KB;实际 min(此值, 服务端 max_send_bytes)
 
 health:
   enabled:  true
@@ -1415,7 +1336,7 @@ logging:
 | 状态码 | 触发条件 | 产生位置 |
 |---|---|---|
 | 400 | Host 头非法 / 不属于 `root_domain` / 多层子域名 | `servePublic` |
-| 404 | 子域名未在配置中绑定,或从未有 Client 注册 | `servePublic` |
+| 404 | 无匹配的 Host+Path 路由 / 隧道未注册 | `servePublic` / `RouteTable.Match` |
 | 502 | 隧道通,但 Client 拨号本地服务失败,或响应读取出错 | `proxyErrorHandler` |
 | 503 | 池内无可用后端 / 本地服务不健康(D3)/ 并发流达上限(D6) | `servePublic` |
 | 504 | 超过 `response_header_timeout` 仍未收到响应头 | `proxyErrorHandler` |
@@ -1426,12 +1347,14 @@ logging:
 |---|---|---|
 | 200 | 成功 | 继续 |
 | 204 | 长轮询超时无数据 | **正常**,立即重新 poll |
-| 400 | 缺 `client_id` / 请求体读取失败 | 记日志,重连 |
-| 401 | token 无效 | **致命** → 传输失败 → 退避重连(配置多半错了,退避会拉到 3min) |
+| 400 | 缺 `client_id` / 非法 meta / 请求体读取失败 | 记日志,重连 |
+| 401 | token 无效 | **致命** → 传输失败 → 退避重连 |
 | 404 | 会话不存在 | **致命** → 传输失败 → 重连 |
-| 409 | 该子域名已达 `max_clients` | 记日志,退避重连 |
+| 409 | 该子域名已达 `max_clients`(HttpHop Authenticate) | 记日志,退避重连 |
 | **410** | 【A5】服务端主动关闭了会话 | **致命** → 传输失败 → **立即重连** |
-| **413** | 【A2】请求体超上限 | **可恢复** → `max_send_chunk` 减半后重试,**不断开隧道** |
+| **413** | 【A2】请求体超上限 —— **协议违规** | **致命** → 记录并重连(守规客户端不应出现) |
+| **426** | `protocol_version` 不支持 | **致命** → 停止重试,提示升级 |
+| **302** 等 3xx | 鉴权失败或误配(反扫描重定向) | **致命** → 检查 auth_token |
 
 ---
 
@@ -1491,40 +1414,36 @@ HttpHop/
 │   ├── server/main.go              # 读配置、建 Server、信号处理、优雅停机
 │   └── client/main.go              # 读配置、建 Client、信号处理
 ├── internal/
-│   ├── transport/                  # ★ 地基,从 HttpBroker 移植
-│   │   ├── pipe.go                 #   BufferedPipe + ReadAvailable(+A4 高水位)
-│   │   ├── pipe_test.go            #   移植自 HttpBroker
-│   │   ├── session.go              #   Session(改名 + A3 pollInFlight)
-│   │   ├── httpconn.go             #   HTTPConn(+A1 +A2 +A5 +D3 +D10)
-│   │   ├── httpconn_test.go        #   移植自 HttpBroker
-│   │   └── transport.go            #   Conn 接口、HTTPConnector、YamuxConfig()
 │   ├── registry/
-│   │   ├── registry.go             #   Registry、ClientTunnel、Sweep
+│   │   ├── registry.go             #   Registry、ClientTunnel
 │   │   └── pool.go                 #   ★F TunnelPool + Balancer + firstAvailable
 │   ├── router/
-│   │   └── host.go                 #   Subdomain 解析 + autocert HostPolicy
+│   │   ├── host.go                 #   HostKey + autocert HostPolicy
+│   │   └── route.go                #   ★G RouteTable、StripPathPrefix
 │   ├── server/
-│   │   ├── server.go               #   控制面 connect/poll/delete/status + sweepLoop
+│   │   ├── server.go               #   pollmux 挂载、Hooks、StartSweeper、/status
 │   │   ├── proxy.go                #   ★C ReverseProxy + servePublic + DialContext
 │   │   ├── bridge.go               #   ★C OpenStream / Bridge(为裸 TCP 预留)
 │   │   ├── auth.go                 #   TokenStore + AuthMiddleware
 │   │   ├── tls.go                  #   autocert + :80 挑战与跳转 + 证书预热
 │   │   └── errors.go               #   writeHTTPError / writeJSONError
 │   ├── client/
-│   │   ├── client.go               #   重连退避 + yamux Accept 循环
+│   │   ├── client.go               #   pollmux ReconnectLoop + AcceptLoop
 │   │   ├── handler.go              #   拨号本地服务 + 双向桥接 + host 改写
 │   │   └── health.go               #   ★D3 本地服务健康检查
 │   └── config/
-│       ├── config.go               #   viper 加载 + 默认值
+│       ├── config.go               #   viper 加载 + 默认值 + pollmux.ServerConfig 映射
 │       └── validate.go             #   启动时校验(尤其 session_timeout ≥ 2×poll_timeout)
 ├── configs/
 │   ├── server.example.yaml
 │   └── client.example.yaml
+├── plans/
+│   └── IMPLEMENTATION.md           # ★ 分步骤实现指南
 └── test/
     └── integration_test.go         # 进程内端到端
 ```
 
-**★ 标记的是最关键的文件**:`internal/transport/*`(地基)、`internal/server/proxy.go`(HttpHop 特有,HttpBroker 无对应物)、`internal/registry/pool.go`(LB 结构预留)。
+**★ 标记的是最关键的文件**:`internal/server/proxy.go`(HttpHop 特有)、`internal/registry/pool.go`(LB 结构预留)。传输层由 **`github.com/DiamondGo/pollmux`** 外部依赖提供,不在本仓库内。
 
 ---
 
@@ -1532,75 +1451,67 @@ HttpHop/
 
 | 用途 | 选择 | 说明 |
 |---|---|---|
-| 长轮询传输 | 移植 `~/source/HttpBroker/internal/transport` | 已解决空闲开销/队头阻塞/连接数问题,不重新设计 |
-| 多路复用 | `github.com/hashicorp/yamux` | 与 HttpBroker 一致;`EnableKeepAlive=false`、`MaxStreamWindowSize=64KB` |
+| **长轮询传输 + yamux 胶水** | **`github.com/DiamondGo/pollmux`** | A1–A5、B1 第一层、D3/D10、Limits 下发、Connect/Poll/Delete handler、ReconnectLoop/AcceptLoop |
+| 多路复用 | `github.com/hashicorp/yamux`(pollmux 间接依赖) | 通过 `pollmux.ClientSession`/`ServerSession` 建会话,勿直接调 |
 | 公网反向代理 | 标准库 `net/http/httputil` | §3.C |
-| 控制面路由 | `github.com/gorilla/mux` | 匹配 `/tunnel/{id}/poll` 风格 |
+| 控制面路由 | `github.com/gorilla/mux` | 挂载 pollmux handler |
 | 配置 | `github.com/spf13/viper` + `mitchellh/mapstructure` | 与 HttpBroker 一致 |
-| 日志 | `go.uber.org/zap` | 结构化日志 |
+| 日志 | `go.uber.org/zap` + `go.uber.org/zap/exp/zapslog` | HttpHop 用 zap;边界桥接到 pollmux 的 slog |
 | 自动 TLS | `golang.org/x/crypto/acme/autocert` | HTTP-01 逐域名签发(不支持通配符) |
-| 测试 | 标准库 `testing` + `net/http/httptest` | HttpBroker 的 `pipe_test.go`/`httpconn_test.go` 可直接参考 |
+| 测试 | 标准库 `testing` + `net/http/httptest` | 传输层回归由 pollmux 测试覆盖;HttpHop 写集成测试 |
 
 ---
 
 ## 十五、分阶段实现顺序与验收
 
-每一阶段都要能独立验证再进入下一阶段。**不要跳过阶段 1 的测试** —— 后面所有东西都建在它上面。
+**逐步任务清单、每步产出与命令见 [plans/IMPLEMENTATION.md](plans/IMPLEMENTATION.md)。** 本节仅保留阶段概览。
+
+每一阶段都要能独立验证再进入下一阶段。**pollmux 库本身已完成并有单测**;HttpHop 从阶段 1 起直接引用。
 
 ### 阶段 0:项目骨架与仓库初始化
 
-1. `git init`,添加上游 `https://github.com/DiamondGo/HttpHop.git`(**推送前先 `git ls-remote` 确认远端是否已有内容**,避免覆盖别人的提交)。
-2. `go mod init github.com/DiamondGo/HttpHop`(Go ≥ 1.21)。
-3. 建目录骨架;`.gitignore`(Go 模板 + 二进制产物 + `configs/*.local.yaml`);`Makefile`(build / test / lint)。
-4. `README.md`:项目定位 + 快速上手占位 + **§18 已知限制**(尤其上下行吞吐不对称、前置 CDN 会截断长轮询)。
-5. 把本设计文档复制进仓库的 `plans/architecture.md`(与 HttpBroker 的目录习惯一致),让设计与代码同仓演进。
-6. 首次提交并 `git push -u origin <默认分支>`。
+1. `go mod init github.com/DiamondGo/HttpHop`(Go ≥ 1.21)。
+2. `go get github.com/DiamondGo/pollmux`(开发期可用 `replace` 指本地 `../pollmux`)。
+3. 建目录骨架;`.gitignore`;`Makefile`(build / test / lint)。
+4. `README.md`:项目定位 + 快速上手占位 + **§18 已知限制**。
+5. 本设计文档保留在仓库根目录 `ARCHITECTURE.md`(或与 HttpBroker 一致复制到 `plans/architecture.md`)。
 
-**验收**:`go build ./...` 通过(空实现);`git log` 有首次提交;远端可见。
+**验收**:`go build ./...` 通过(空实现)。
 
-### 阶段 1:传输层 ★ 最关键
+### 阶段 1:配置 + pollmux 接线骨架
 
-`internal/transport/{pipe.go,session.go,httpconn.go,transport.go}` + 移植的单测。落地 **A1、A2、A4、A5(客户端侧)、D3(上报通道)、D10**。
-**验收**:
+`internal/config/{config.go,validate.go}` + 两个 example yaml;`internal/server/server.go` 最小化挂载 pollmux handler(可先用 stub Hooks)。
+**验收**:能加载示例配置;`session_timeout < 2×poll_timeout` 时报明确错误;`httptest` 走完 connect → poll → delete(pollmux handler 已挂载)。
 
-- `pipe_test.go` 全绿,含 `ReadAvailable` 两阶段行为(超时返回 0、合并窗口攒够再返回、关闭返回 EOF)。
-- 新增测试:`flushLoop` 分片正确、遇 413 减半重试且不断开、`maxSendChunk` 边界。
-- 新增测试:用 `httptest` 起一个"永不响应"的假服务端,断言 `pollLoop` 在 `poll_timeout + grace` 内触发 `TransportFailed()`(**这是 A1 的直接验收**)。
+### 阶段 2:注册表与路由
 
-### 阶段 2:配置
+`internal/registry/{registry.go,pool.go}`、`internal/router/{host.go,route.go}`。
+**验收**:单测 —— HostKey(含 apex `@`);RouteTable 最长前缀与兜底;`strip_prefix` 改写;路径前缀冲突启动失败;同 `client_id` 重连替换。
 
-`internal/config/{config.go,validate.go}` + 两个 example yaml。
-**验收**:能加载示例配置;`session_timeout < 2×poll_timeout` 时报出明确错误。
+### 阶段 3:服务端控制面 Hooks ★
 
-### 阶段 3:注册表与路由
+完善 `authenticateConnect` / `onConnect` / `onPoll` / `onDisconnect`;`StartSweeper`;证书预热。
+**验收**:connect 返回 `limits` + `meta.subdomain`;EOF/CloseSession 时 poll 返回 410;`PollInFlight` 在 `/status` 可见;`X-Local-Health` 更新 Registry。
 
-`internal/registry/{registry.go,pool.go}`、`internal/router/host.go`。
-**验收**:单测覆盖 —— 子域名解析的各种边界;同 `client_id` 重连是替换而非新增;`max_clients` 达上限返回 `ErrPoolFull`;`Sweep` 正确驱逐过期会话。
-
-### 阶段 4:服务端控制面
-
-`internal/server/{server.go,auth.go,errors.go}`。落地 **A3、A5(服务端侧)、B1 第一层、D3(接收侧)**,含 `handleConnect` 的预注册竞态修复。
-**验收**:用 `httptest` 走完 connect → poll → delete 全流程;断言 EOF 时返回 410 而非 204;断言超限返回 413;断言 `pollInFlight` 计数正确。
-
-### 阶段 5:服务端公网侧 ★ HttpHop 特有
+### 阶段 4:服务端公网侧 ★ HttpHop 特有
 
 `internal/server/{proxy.go,bridge.go}`。
-**验收**:`httptest` 起一个假 yamux 对端,断言请求被正确转发、`X-Forwarded-For` 被注入、伪造的入站 XFF 被剥离、错误路径返回正确状态码。
+**验收**:`httptest` + 假 yamux Client 端,断言 `X-Forwarded-For` 注入、伪造 XFF 剥离、404/503 路径正确。
 
-### 阶段 6:客户端
+### 阶段 5:客户端
 
-`internal/client/{client.go,handler.go,health.go}`。
-**验收**:能连上阶段 4 的服务端并保持;杀掉服务端后按退避重连;健康检查状态变化能反映到 `/status`。
+`internal/client/{client.go,handler.go,health.go}` —— `ReconnectLoop` + `AcceptLoop`。
+**验收**:连上阶段 3 服务端并保持;杀服务端后退避重连;健康状态反映到 `/status`。
 
-### 阶段 7:main 与 TLS
+### 阶段 6:main 与 TLS
 
 `cmd/server/main.go`、`cmd/client/main.go`、`internal/server/tls.go`。
-**验收**:两个二进制能用示例配置起来;本地自签证书场景下完整跑通一次请求。
+**验收**:两二进制用示例配置跑通;本地自签证书场景完整请求一次。
 
-### 阶段 8:集成测试与文档
+### 阶段 7:集成测试与文档
 
-`test/integration_test.go`;README(**必须写明上下行吞吐不对称**);部署说明(systemd unit 样例)。
-**验收**:§16 的全部用例通过。
+`test/integration_test.go`;README(**必须写明上下行吞吐不对称**);部署说明。
+**验收**:§16 全部用例通过。
 
 ---
 
@@ -1610,39 +1521,41 @@ HttpHop/
 
 | 目标 | 关键用例 |
 |---|---|
-| `BufferedPipe` | 阶段一超时返回 `(0, nil)`;阶段二合并窗口;关闭后返回 EOF;并发读写无 race(`-race`) |
-| `HTTPConn` | 分片发送;413 减半重试;**永不响应的服务端在 `poll_timeout+grace` 内触发 `TransportFailed`**;404/410/401 立即失败 |
-| `Session` | `pollInFlight` 增减;`IsExpired` 边界;`Close` 幂等 |
-| `Registry`/`Pool` | 同 ID 替换;`max_clients` 上限;`Sweep` 驱逐;并发注册无 race |
-| `router.Subdomain` | 带端口、根域、多层子域、域名不匹配、大小写 |
+| pollmux(外部) | A1/A2/A5/B1 等已由库单测覆盖;HttpHop 不重复 |
+| `Registry`/`Pool` | 同 ID 替换;`max_clients` 上限;并发注册无 race |
+| `router.HostKey` / `RouteTable` | apex `@`;最长前缀;兜底 `path_prefix:""`;StripPathPrefix 边界 |
 | `config.Validate` | 各项约束尤其 `session_timeout ≥ 2×poll_timeout` |
+| Server Hooks | Authenticate 409;OnConnect 登记;OnPoll 健康上报 |
 
 ### 集成测试(`test/integration_test.go`,进程内)
 
 起 server + client + 本地 echo 服务,全部在同一进程内用随机端口:
 
 1. **基本转发**:请求经隧道到达 echo 服务,响应正确。
-2. **多租户路由**:两个 client / 两个 token / 两个子域名,按 Host 正确分流。
-3. **并发**:50 个并发请求不串行化(总耗时应接近单个请求而非 50 倍)—— 验证 yamux 多路复用 + 读写分离确实消除了队头阻塞。
+2. **路径映射**:公网 `builderrors.com/service/auth` + `strip_prefix: true` → 内网 echo 收到 `/auth`。
+3. **多租户路由**:两个 client / 两个 token / 不同 Host 或 PathPrefix,互不串路。
+4. **并发**:50 个并发请求不串行化(总耗时应接近单个请求而非 50 倍)—— 验证 yamux 多路复用 + 读写分离确实消除了队头阻塞。
 4. **重连**:关掉 server 再起来,client 自动重连,期间的请求返回 503/504 而非挂死。
 5. **410 快速重连**(A5):server 主动关闭会话,断言 client 在**秒级**内重连,而不是等到 `session_timeout`。
-6. **413 不断链**(A2):构造超过 `max_send_chunk` 的响应体,断言隧道**不被重置**且请求成功。
-7. **X-Forwarded-For**(D1):echo 服务回显请求头,断言拿到真实调用方 IP;再从公网侧伪造 `X-Forwarded-For: 1.2.3.4`,断言它被**剥离**而非被信任。
-8. **本地服务健康**(D3):停掉 echo 服务,断言 `/status` 在 `interval` 内把 `local_health` 置为 `down`,且该子域名开始返回 503。
-9. **LB 结构未退化**(F):`max_clients: 1` 时第二个 client 注册返回 409;同 `client_id` 重连是替换;重连后 `ClientTunnel.ID` 不变。
+6. **Limits 下发**:客户端 `max_send_chunk` 大于服务端 `max_send_bytes` 时,断言实际使用服务端值;`poll_interval` 过大时 connect 后自检失败。
+7. **413 不断链语义变更**(A2):守规客户端不应触发 413;若手工构造超限请求,断言会话关闭而非减半重试。
+8. **X-Forwarded-For**(D1):echo 服务回显请求头,断言拿到真实调用方 IP;再从公网侧伪造 `X-Forwarded-For: 1.2.3.4`,断言它被**剥离**而非被信任。
+9. **本地服务健康**(D3):停掉 echo 服务,断言 `/status` 在 `interval` 内把 `local_health` 置为 `down`,且该子域名开始返回 503。
+10. **LB 结构未退化**(F):`max_clients: 1` 时第二个 client 注册返回 409;同 `client_id` 重连是替换;重连后 `ClientTunnel.ID` 不变。
+11. **protocol_version**:客户端声明 `999`,断言服务端 426 且停止重试。
 
 ### 手工/端到端验证
 
-10. **心跳三层验收(需求 #3 的核心)**:
+1. **心跳三层验收(需求 #3 的核心)**:
     - a. `kill -9` 客户端 → 服务端应在 60s 内驱逐;若有 TCP FIN,`poll_in_flight` 应**立即**归零。
     - b. `iptables -A OUTPUT -d <server> -j DROP` 模拟静默黑洞 → **客户端**应在 ~40s 内检测到并进入重连(**A1 的直接验收**)。
     - c. 只停本地服务、保持隧道 → `/status` 应在 15s 内标记 `local_health: down`(**D3 的直接验收**)。
-11. **吞吐**:`tc netem` 注入 100ms RTT,下载 100MB 文件;对比 `poll_buffer_size` 64KB vs 256KB,预期 ×4(**B1 第一层的量化验收**,同时作为将来做流式 poll 的性能基线)。
-12. **WebSocket**:通过隧道建立 WS 连接并双向收发若干消息。
-13. **SSE**:通过隧道消费一个 SSE 流,断言事件**逐条实时到达**而非被缓冲(验证 `FlushInterval: -1`)。
-14. **HTTP/2**:`curl --http2` 正常工作(这是 §3.C 相对裸桥接方案的直接收益)。
-15. **大请求体**:POST 5MB body 成功且隧道不重置。
-16. **证书签发**:真实域名下走一次 autocert HTTP-01,确认 `HostPolicy` 只放行已注册子域名。
+2. **吞吐**:`tc netem` 注入 100ms RTT,下载 100MB 文件;对比 `poll_buffer_size` 64KB vs 256KB,预期 ×4(**B1 第一层的量化验收**,同时作为将来做流式 poll 的性能基线)。
+3. **WebSocket**:通过隧道建立 WS 连接并双向收发若干消息。
+4. **SSE**:通过隧道消费一个 SSE 流,断言事件**逐条实时到达**而非被缓冲(验证 `FlushInterval: -1`)。
+5. **HTTP/2**:`curl --http2` 正常工作(这是 §3.C 相对裸桥接方案的直接收益)。
+6. **大请求体**:POST 5MB body 成功且隧道不重置。
+7. **证书签发**:真实域名下走一次 autocert HTTP-01,确认 `HostPolicy` 只放行已注册子域名。
 
 ---
 
@@ -1656,7 +1569,8 @@ MVP = **第一个能真正部署、能把内网服务可靠暴露到公网的版
 
 **因为它们是产品定义的一部分**:
 
-- 传输层移植 + 单测(阶段 1)
+- 引用 **pollmux** 作为传输层(§5)
+- **域名映射 + 路径映射**(§3.G):含 apex `@`、`path_prefix`、`strip_prefix`
 - ReverseProxy 公网侧 + `bridge.go` 抽取(§3.C)
 - 多租户注册表与 Host 路由,含 **§3.F 的结构预留**(`TunnelPool` / `client_id` / `Balancer`)
 - token → 子域名绑定认证
@@ -1669,7 +1583,7 @@ MVP = **第一个能真正部署、能把内网服务可靠暴露到公网的版
 
 | 项 | 推后理由 |
 |---|---|
-| **B1 第二层:流式 chunked poll** | 要重写 `pollLoop` / `handlePoll` 两个地基函数,应等 MVP 跑通、有测试覆盖后再动;且需实测前置 CDN 对 chunked 的缓冲行为。`poll_mode` 配置项现在就预留 |
+| **B1 第二层:流式 chunked poll** | 要改 pollmux 的 `pollLoop`/`PollHandler`,应等 MVP 跑通后再动;且需实测前置 CDN 对 chunked 的缓冲行为。`poll_mode` 配置项已预留 |
 | LB 策略(轮询/最少连接/一致性哈希) | MVP 只留 `Balancer` 接口 + `firstAvailable` |
 | sticky cookie 读写、后端健康剔除、故障重试 | 依赖 LB 策略 |
 | 裸 TCP/UDP 端口转发 | `bridge.go` 已预留复用点 |
@@ -1685,9 +1599,11 @@ MVP = **第一个能真正部署、能把内网服务可靠暴露到公网的版
 实现完成后应写进 README,避免使用者踩坑:
 
 1. **上下行吞吐不对称**:下行受 `poll_buffer_size / RTT` 限制(256KB @ 150ms ≈ 1.7MB/s),上行受 `max_send_chunk / RTT` 限制但缓冲自适应,实际更高。跨境高 RTT 场景下行是瓶颈,等流式 poll 落地后解除。
-2. **单层子域名**:`a.b.httphop.io` 不支持。autocert 用 HTTP-01,无法签发通配符证书。
-3. **响应已开始后无法降级**:响应头已发出再断连,只能中断连接,无法改成 502 —— 这是 HTTP 的固有限制,不是本设计的缺陷。
-4. **前置 CDN/反向代理需要额外配置**:长轮询会被某些默认配置(如 nginx 的 `proxy_read_timeout 60s`)截断;`poll_timeout` 需相应调小。
-5. **`session_timeout` 与 `poll_timeout` 强耦合**:前者必须 ≥ 后者的 2 倍,配置校验会强制这一点。
-6. **本地健康检查只覆盖"能否连通/返回 2xx"**,不代表业务层健康。
-7. **单 Client 只能暴露一个本地目标**:多目标需要多开 Client 实例(或等后续版本)。
+2. **单层子域名 + apex 根域**:`a.b.builderrors.com` 不支持;`builderrors.com` 通过 `subdomain: "@"` 支持。
+3. **路径映射**仅支持前缀匹配 + 可选剥前缀;**部署上优先整子域名映射**,apex 路径前缀为备选(见 §G0 / README)。
+4. **响应已开始后无法降级**:响应头已发出再断连,只能中断连接,无法改成 502 —— 这是 HTTP 的固有限制,不是本设计的缺陷。
+5. **前置 CDN/反向代理需要额外配置**:长轮询会被某些默认配置(如 nginx 的 `proxy_read_timeout 60s`)截断;`poll_timeout` 需相应调小。HttpHop **不依赖**前置反代做路径路由,但若 CDN 仍在前端,需单独调 CDN 超时。
+6. **`session_timeout` 与 `poll_timeout` 强耦合**:服务端配置必须满足 `session_timeout ≥ 2×poll_timeout`;connect 下发的 `limits` 保证客户端与服务端一致。
+7. **内存**:yamux 窗口下限 256KB,典型并发下约 **64MB/隧道**;多租户需乘以隧道数,可用 `max_streams_per_tunnel` 下调。
+8. **本地健康检查只覆盖"能否连通/返回 2xx"**,不代表业务层健康。
+9. **单 Client 只能暴露一个本地 target**:多目标需要多开 Client 实例,或在同一 target 后自建应用层路由。
