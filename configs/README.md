@@ -14,6 +14,9 @@ configs/
     builderrors/
       server.yaml.example
       client.yaml.example
+    ai.builderrors/       # ai.builderrors.com (single-service VPS)
+      server.yaml.example
+      client.yaml.example
     secrets/              # token examples (one file per client_id)
       home-gpu-01.token.example
       myai.token.example

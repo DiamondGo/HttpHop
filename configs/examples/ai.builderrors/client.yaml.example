@@ -1,0 +1,29 @@
+# Pair with configs/examples/ai.builderrors/server.yaml.example
+#
+# url uses https:// because Cloudflare provides HTTPS to the Client.
+# HttpHop on the VPS still listens on plain HTTP (tls.disable: true).
+
+client_id: "myai"
+
+server:
+  url: "https://ai.builderrors.com"
+  control_path: "/tunnel"
+  token_file: "/etc/httphop/secrets/myai.token"
+  insecure_skip_verify: false
+
+local:
+  target: "127.0.0.1:8080"
+  host_header_rewrite: ""
+
+transport:
+  poll_interval: 0s
+  poll_grace: 10s
+
+health:
+  enabled: true
+  mode: "tcp"
+  interval: 15s
+  timeout: 3s
+
+logging:
+  level: "info"

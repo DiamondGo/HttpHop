@@ -1,0 +1,63 @@
+# HttpHop Server — ai.builderrors.com
+#
+# HTTPS: Cloudflare (visitor → CF). HttpHop speaks HTTP only on the VPS.
+# Typical chain:  user → HTTPS → Cloudflare → HTTP → nginx → HttpHop
+#
+# Routes on ai.builderrors.com:
+#   /*           → client_id "myai" → internal AI app
+#   /tunnel/*    → control plane (NOT forwarded to the app)
+#
+# VPS layout:
+#   /etc/httphop/server.yaml
+#   /etc/httphop/secrets/myai.token
+#
+# Cloudflare: SSL mode "Flexible" or "Full" (HTTP to origin). Orange cloud on ai.*
+# nginx: proxy ai.builderrors.com → http://127.0.0.1:8443 (see README / comments below)
+
+root_domain: "builderrors.com"
+control_path: "/tunnel"
+
+# HTTP only on localhost — nginx receives public traffic and proxies here.
+# Do not use ":8443" (all interfaces); nginx is the only entry point.
+dev_listen: "127.0.0.1:8443"
+tls:
+  disable: true
+
+tunnel:
+  poll_timeout: 30s
+  session_timeout: 60s
+  sweep_interval: 5s
+  max_streams_per_tunnel: 256
+
+proxy:
+  response_header_timeout: 60s
+  read_header_timeout: 10s
+
+clients:
+  - client_id: "myai"
+    subdomain: "ai"
+    token_file: "/etc/httphop/secrets/myai.token"
+    max_clients: 1
+
+status:
+  enabled: true
+  listen: "127.0.0.1:9090"
+
+logging:
+  level: "info"
+
+# nginx snippet (on VPS, terminates nothing if CF connects to :80; or local SSL optional):
+#
+#   server {
+#       listen 80;
+#       server_name ai.builderrors.com;
+#       location / {
+#           proxy_pass http://127.0.0.1:8443;
+#           proxy_set_header Host $host;
+#           proxy_set_header X-Forwarded-Proto https;
+#           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#           proxy_read_timeout 120s;
+#           proxy_buffering off;
+#       }
+#   }
+#
