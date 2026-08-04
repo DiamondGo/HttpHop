@@ -6,7 +6,7 @@ HttpHop runs a **Server** on a machine with a public IP and domain, and a **Clie
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and [plans/IMPLEMENTATION.md](plans/IMPLEMENTATION.md) for the build plan.
 
-Example configs for a full deployment: [configs/server.builderrors.example.yaml](configs/server.builderrors.example.yaml), [configs/client.builderrors.example.yaml](configs/client.builderrors.example.yaml).
+Example configs: [configs/README.md](configs/README.md) — copy from `configs/examples/` to `configs/local/`.
 
 ## How it works
 
@@ -14,8 +14,8 @@ Example configs for a full deployment: [configs/server.builderrors.example.yaml]
   Internet user                Public VPS (HttpHop Server)          Internal network (HttpHop Client)
   ─────────────                ───────────────────────────          ────────────────────────────────
 
-  https://myapp.example.com    :443  TLS + route by Host
-        │                      tunnel.example.com  ←── long poll ──►  Client (outbound only)
+  https://ai.example.com         :443  TLS + route by Host
+        │                      /tunnel/*  ←── long poll ──►  Client (outbound only)
         │                            │                                  │
         └──── HTTP request ─────────►│── yamux stream ─────────────────►│──► 127.0.0.1:8080
                                      │                                  local HTTP service
@@ -29,14 +29,14 @@ Example configs for a full deployment: [configs/server.builderrors.example.yaml]
 
 ## Usage example: internal service on a public VPS
 
-This walkthrough exposes an app on `127.0.0.1:8080` inside a home lab as **`https://myapp.builderrors.com`**.
+This walkthrough exposes an app on `127.0.0.1:8080` inside a home lab as **`https://ai.builderrors.com`**.
 
 ### Roles
 
 | Machine | Runs | Needs |
 |---|---|---|
 | **VPS** (203.0.113.10) | `httphop-server` | Public IP, domain `builderrors.com`, ports 80/443 open |
-| **Home lab** | Your app + `httphop-client` | Outbound HTTPS to `tunnel.builderrors.com`, app on `127.0.0.1:8080` |
+| **Home lab** | Your app + `httphop-client` | Outbound HTTPS to `ai.builderrors.com`, app on `127.0.0.1:8080` |
 
 ### 1. Build binaries
 
@@ -54,21 +54,19 @@ make build
 | Type | Name | Content | Proxy |
 |---|---|---|---|
 | A | `@` | 203.0.113.10 | Proxied (optional) |
-| A | `myapp` | 203.0.113.10 | Proxied (optional) |
-| A | `tunnel` | 203.0.113.10 | **DNS only (grey cloud)** recommended |
+| A | `ai` | 203.0.113.10 | Proxied (optional; grey cloud if long polls are cut) |
 
-- **`myapp.builderrors.com`**: where users visit your app.
-- **`tunnel.builderrors.com`**: control plane — Client connects here. Grey cloud avoids Cloudflare cutting long polls.
+- **`ai.builderrors.com`**: where users visit your app **and** where the Client connects (`/tunnel/*` control paths).
 
 ### 3. Server config (VPS)
 
-Copy [configs/server.builderrors.example.yaml](configs/server.builderrors.example.yaml) to `/etc/httphop/server.yaml`. Generate a random token (≥ 32 characters):
+Copy [configs/examples/builderrors/](configs/examples/builderrors/) to `configs/local/` or `/etc/httphop/`. See [configs/README.md](configs/README.md).
 
 ```bash
-openssl rand -hex 32
+openssl rand -hex 32 > configs/secrets/myai.token
 ```
 
-Set that token in `tunnels[0].token`. Ensure `tls.disable: false` for production (Let's Encrypt via autocert on ports 80/443).
+Set paths in `clients[].token_file` / `server.token_file`. Ensure `tls.disable: false` for production (Let's Encrypt via autocert on ports 80/443).
 
 Start the Server:
 
@@ -81,12 +79,14 @@ Firewall: allow **80** (ACME + redirect) and **443** (HTTPS).
 
 ### 4. Client config (home lab)
 
-Copy [configs/client.builderrors.example.yaml](configs/client.builderrors.example.yaml) to `/etc/httphop/client.yaml`.
+Copy [configs/examples/builderrors/client.yaml.example](configs/examples/builderrors/client.yaml.example) to your Client machine.
 
-- **`server.url`**: `https://tunnel.builderrors.com` (control host, not `myapp`)
-- **`server.token`**: same token as on the Server
+- **`server.url`**: `https://ai.builderrors.com` (same host as users; Client uses `/tunnel/*` paths)
+- **`server.control_path`**: must match Server `control_path` (default `/tunnel`)
+- **`clients[].token_file`**: per-client secret on the Server (same file content as Client's `server.token_file`)
+- **`server.token_file`**: this Client's secret file (must match Server entry for same `client_id`)
+- **`client_id`**: must match Server `clients[].client_id` — decides subdomain/path routing
 - **`local.target`**: where your app listens, e.g. `127.0.0.1:8080`
-- **`client_id`**: stable name (e.g. `home-lab-01`); keep the same across restarts
 
 Start your app, then the Client:
 
@@ -168,8 +168,10 @@ tunnels:
 
 ```bash
 make build
-./bin/httphop-server -config configs/server.example.yaml
-./bin/httphop-client -config configs/client.example.yaml
+make config-local
+openssl rand -hex 32 > configs/secrets/home-gpu-01.token
+./bin/httphop-server -config configs/local/server.yaml
+./bin/httphop-client -config configs/local/client.yaml
 ```
 
 The bundled examples use `tls.disable: true` and `dev_listen: :8443` for local testing without certificates.
@@ -182,17 +184,29 @@ The bundled examples use `tls.disable: true` and `dev_listen: :8443` for local t
 https://myapp.example.com/auth  →  Client  →  127.0.0.1:8080/auth
 ```
 
-Server (`configs/server.example.yaml`):
+Server (`configs/examples/local/server.yaml.example`):
 
 ```yaml
 root_domain: example.com
-control_host: tunnel.example.com
+control_path: /tunnel
 
-tunnels:
-  - subdomain: "myapp"          # myapp.example.com
-    token: "..."
+clients:
+  - client_id: "myai"           # stable identity → routing
+    subdomain: "ai"
+    token_file: "../secrets/myai.token"
     max_clients: 1
 ```
+
+Client (`client.yaml`):
+
+```yaml
+client_id: "myai"
+server:
+  url: "https://ai.example.com"
+  token_file: "../secrets/myai.token"   # secrets dir, outside yaml folder
+```
+
+Rotate auth: replace token in **both** token files only; `client_id` and routing stay unchanged.
 
 Client: point `local.target` at your service. No path settings on the Client.
 
@@ -233,10 +247,10 @@ That covers most simple redirects and session cookies. It does **not** rewrite H
 
 | Goal | Server binding | User visits |
 |---|---|---|
-| **Recommended** | `subdomain: "myapp"` | `https://myapp.builderrors.com/...` |
+| **Recommended** | `subdomain: "ai"` | `https://ai.builderrors.com/...` |
 | Apex path (optional) | `subdomain: "@"`, `path_prefix: "/service"`, `strip_prefix: true` | `https://builderrors.com/service/...` |
 
-Control plane (Client connects here): `https://tunnel.builderrors.com` — use **DNS only (grey cloud)** on Cloudflare if possible, so long polls are not cut.
+Client connects to the **same public host** at `{control_path}/*` (default `/tunnel/connect`, `/tunnel/{id}/poll`). Do not use that path prefix for your app routes.
 
 ---
 

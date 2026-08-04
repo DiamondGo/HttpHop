@@ -1,0 +1,26 @@
+# Pair with configs/examples/builderrors/server.yaml.example
+
+client_id: "myai"
+
+server:
+  url: "https://ai.builderrors.com"
+  control_path: "/tunnel"
+  token_file: "../secrets/myai.token"
+  insecure_skip_verify: false
+
+local:
+  target: "127.0.0.1:8080"
+  host_header_rewrite: ""
+
+transport:
+  poll_interval: 0s
+  poll_grace: 10s
+
+health:
+  enabled: true
+  mode: "tcp"
+  interval: 15s
+  timeout: 3s
+
+logging:
+  level: "info"

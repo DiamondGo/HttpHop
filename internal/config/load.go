@@ -20,6 +20,9 @@ func LoadServer(path string) (*ServerConfig, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	applyServerDefaults(&cfg)
+	if err := resolveClientBindingTokens(cfg.Clients, path); err != nil {
+		return nil, err
+	}
 	if err := ValidateServer(&cfg); err != nil {
 		return nil, err
 	}
@@ -37,6 +40,9 @@ func LoadClient(path string) (*ClientConfig, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	applyClientDefaults(&cfg)
+	if err := resolveClientAuthToken(&cfg, path); err != nil {
+		return nil, err
+	}
 	if err := ValidateClient(&cfg); err != nil {
 		return nil, err
 	}
@@ -93,9 +99,12 @@ func applyServerDefaults(cfg *ServerConfig) {
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = d.Logging.Level
 	}
-	for i := range cfg.Tunnels {
-		if cfg.Tunnels[i].MaxClients == 0 {
-			cfg.Tunnels[i].MaxClients = 1
+	if cfg.ControlPath == "" {
+		cfg.ControlPath = d.ControlPath
+	}
+	for i := range cfg.Clients {
+		if cfg.Clients[i].MaxClients == 0 {
+			cfg.Clients[i].MaxClients = 1
 		}
 	}
 }
@@ -138,11 +147,13 @@ func ValidateServer(cfg *ServerConfig) error {
 	if cfg.RootDomain == "" {
 		return fmt.Errorf("root_domain is required")
 	}
-	if cfg.ControlHost == "" {
-		return fmt.Errorf("control_host is required")
+	normalizedControlPath, err := validateControlPath(cfg.ControlPath)
+	if err != nil {
+		return err
 	}
-	if !strings.HasSuffix(cfg.ControlHost, cfg.RootDomain) {
-		return fmt.Errorf("control_host must end with root_domain %q", cfg.RootDomain)
+	cfg.ControlPath = normalizedControlPath
+	if err := validateControlPathNotConflicting(cfg.ControlPath, cfg.Clients); err != nil {
+		return err
 	}
 	if cfg.Tunnel.SessionTimeout < 2*cfg.Tunnel.PollTimeout {
 		return fmt.Errorf("session_timeout (%v) must be >= 2 × poll_timeout (%v)",
@@ -155,60 +166,72 @@ func ValidateServer(cfg *ServerConfig) error {
 	if pollMode != pollmux.PollModeBatch {
 		return fmt.Errorf("poll_mode %q is not implemented; use %q", pollMode, pollmux.PollModeBatch)
 	}
-	if len(cfg.Tunnels) == 0 {
-		return fmt.Errorf("at least one tunnel binding is required")
+	if len(cfg.Clients) == 0 {
+		return fmt.Errorf("at least one client binding is required")
 	}
 
-	seenToken := make(map[string]struct{})
-	seenKey := make(map[string]struct{})
-	for _, tb := range cfg.Tunnels {
-		if len(tb.Token) < 32 {
-			return fmt.Errorf("tunnel token for subdomain %q must be at least 32 characters", tb.Subdomain)
+	seenClientID := make(map[string]struct{})
+	seenRoute := make(map[string]struct{})
+	seenToken := make(map[string]string)
+	for _, cb := range cfg.Clients {
+		if cb.ClientID == "" {
+			return fmt.Errorf("client_id is required for each client binding")
 		}
-		if _, ok := seenToken[tb.Token]; ok {
-			return fmt.Errorf("duplicate tunnel token")
+		if cb.TokenFile == "" && cb.Token == "" {
+			return fmt.Errorf("client_id %q requires token_file", cb.ClientID)
 		}
-		seenToken[tb.Token] = struct{}{}
+		if _, ok := seenClientID[cb.ClientID]; ok {
+			return fmt.Errorf("duplicate client_id %q", cb.ClientID)
+		}
+		seenClientID[cb.ClientID] = struct{}{}
 
-		key := tb.Subdomain + "\x00" + normalizePathPrefix(tb.PathPrefix)
-		if _, ok := seenKey[key]; ok {
-			return fmt.Errorf("duplicate tunnel binding for subdomain %q path_prefix %q", tb.Subdomain, tb.PathPrefix)
+		if len(cb.Token) < 32 {
+			return fmt.Errorf("token for client_id %q must be at least 32 characters", cb.ClientID)
 		}
-		seenKey[key] = struct{}{}
+		if other, ok := seenToken[cb.Token]; ok {
+			return fmt.Errorf("duplicate token shared by client_id %q and %q", other, cb.ClientID)
+		}
+		seenToken[cb.Token] = cb.ClientID
 
-		if tb.PathPrefix != "" && !strings.HasPrefix(tb.PathPrefix, "/") {
-			return fmt.Errorf("path_prefix for subdomain %q must start with /", tb.Subdomain)
+		routeKey := cb.Subdomain + "\x00" + normalizePathPrefix(cb.PathPrefix)
+		if _, ok := seenRoute[routeKey]; ok {
+			return fmt.Errorf("duplicate route for subdomain %q path_prefix %q", cb.Subdomain, cb.PathPrefix)
+		}
+		seenRoute[routeKey] = struct{}{}
+
+		if cb.PathPrefix != "" && !strings.HasPrefix(cb.PathPrefix, "/") {
+			return fmt.Errorf("path_prefix for client_id %q must start with /", cb.ClientID)
 		}
 	}
 
-	if err := validatePathPrefixConflicts(cfg.Tunnels); err != nil {
+	if err := validatePathPrefixConflicts(cfg.Clients); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validatePathPrefixConflicts(bindings []TunnelBinding) error {
+func validatePathPrefixConflicts(bindings []ClientBinding) error {
 	type entry struct {
-		prefix string
-		token  string
+		prefix   string
+		clientID string
 	}
 	byHost := make(map[string][]entry)
-	for _, tb := range bindings {
-		p := normalizePathPrefix(tb.PathPrefix)
+	for _, cb := range bindings {
+		p := normalizePathPrefix(cb.PathPrefix)
 		if p == "" {
 			continue
 		}
-		byHost[tb.Subdomain] = append(byHost[tb.Subdomain], entry{p, tb.Token})
+		byHost[cb.Subdomain] = append(byHost[cb.Subdomain], entry{p, cb.ClientID})
 	}
 	for host, entries := range byHost {
 		for i := range entries {
 			for j := range entries {
-				if i == j || entries[i].token == entries[j].token {
+				if i == j || entries[i].clientID == entries[j].clientID {
 					continue
 				}
 				a, b := entries[i].prefix, entries[j].prefix
 				if strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/") || a == b {
-					return fmt.Errorf("conflicting path_prefix on subdomain %q: %q and %q point to different tokens",
+					return fmt.Errorf("conflicting path_prefix on subdomain %q: %q and %q point to different client_ids",
 						host, entries[i].prefix, entries[j].prefix)
 				}
 			}
@@ -236,7 +259,10 @@ func ValidateClient(cfg *ClientConfig) error {
 		return fmt.Errorf("server.url is required")
 	}
 	if cfg.Server.Token == "" {
-		return fmt.Errorf("server.token is required")
+		return fmt.Errorf("server token is required (set server.token_file)")
+	}
+	if len(cfg.Server.Token) < 32 {
+		return fmt.Errorf("server token must be at least 32 characters")
 	}
 	if cfg.Local.Target == "" {
 		return fmt.Errorf("local.target is required")

@@ -18,18 +18,20 @@ import (
 	"github.com/DiamondGo/HttpHop/internal/server"
 )
 
-func testServerConfig(token string) *config.ServerConfig {
+const testClientToken = "tttttttttttttttttttttttttttttttt"
+
+func testServerConfig(clientID string) *config.ServerConfig {
 	cfg := config.Defaults()
 	cfg.RootDomain = "httphop.io"
-	cfg.ControlHost = "tunnel.httphop.io"
 	cfg.TLS.Disable = true
 	cfg.Tunnel.PollTimeout = 200 * time.Millisecond
 	cfg.Tunnel.SessionTimeout = 2 * cfg.Tunnel.PollTimeout
 	cfg.Tunnel.SweepInterval = 50 * time.Millisecond
 	cfg.Status.Enabled = true
-	cfg.Tunnels = []config.TunnelBinding{{
+	cfg.Clients = []config.ClientBinding{{
+		ClientID:   clientID,
 		Subdomain:  "myapp",
-		Token:      token,
+		Token:      testClientToken,
 		MaxClients: 1,
 	}}
 	return &cfg
@@ -58,16 +60,16 @@ func startTestServer(t *testing.T, cfg *config.ServerConfig) (*server.Server, st
 }
 
 func TestControlConnectPollDelete(t *testing.T) {
-	token := strings.Repeat("t", 32)
-	cfg := testServerConfig(token)
+	const clientID = "test-client"
+	cfg := testServerConfig(clientID)
 	_, baseURL := startTestServer(t, cfg)
 
 	body, _ := json.Marshal(pollmux.ConnectRequest{
 		ProtocolVersion: pollmux.ProtocolVersion,
-		Meta:            map[string]string{"client_id": "test-client"},
+		Meta:            map[string]string{"client_id": clientID},
 	})
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/connect", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+testClientToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -95,7 +97,7 @@ func TestControlConnectPollDelete(t *testing.T) {
 	}
 
 	pollReq, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/"+cr.SessionID+"/poll", nil)
-	pollReq.Header.Set("Authorization", "Bearer "+token)
+	pollReq.Header.Set("Authorization", "Bearer "+testClientToken)
 	pollReq.Header.Set("X-Receive-Only", "true")
 	pollResp, err := http.DefaultClient.Do(pollReq)
 	if err != nil {
@@ -107,7 +109,7 @@ func TestControlConnectPollDelete(t *testing.T) {
 	}
 
 	delReq, _ := http.NewRequest(http.MethodDelete, baseURL+"/tunnel/"+cr.SessionID, nil)
-	delReq.Header.Set("Authorization", "Bearer "+token)
+	delReq.Header.Set("Authorization", "Bearer "+testClientToken)
 	delResp, err := http.DefaultClient.Do(delReq)
 	if err != nil {
 		t.Fatal(err)
@@ -119,13 +121,12 @@ func TestControlConnectPollDelete(t *testing.T) {
 }
 
 func TestControlInvalidToken(t *testing.T) {
-	token := strings.Repeat("t", 32)
-	cfg := testServerConfig(token)
+	cfg := testServerConfig("test-client")
 	_, baseURL := startTestServer(t, cfg)
 
 	body, _ := json.Marshal(pollmux.ConnectRequest{
 		ProtocolVersion: pollmux.ProtocolVersion,
-		Meta:            map[string]string{"client_id": "x"},
+		Meta:            map[string]string{"client_id": "test-client"},
 	})
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/connect", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer wrong")
@@ -140,17 +141,60 @@ func TestControlInvalidToken(t *testing.T) {
 	}
 }
 
+func TestControlWrongClientToken(t *testing.T) {
+	cfg := testServerConfig("registered-client")
+	cfg.Clients[0].Token = strings.Repeat("a", 32)
+	_, baseURL := startTestServer(t, cfg)
+
+	body, _ := json.Marshal(pollmux.ConnectRequest{
+		ProtocolVersion: pollmux.ProtocolVersion,
+		Meta:            map[string]string{"client_id": "registered-client"},
+	})
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/connect", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testClientToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestControlUnknownClientID(t *testing.T) {
+	cfg := testServerConfig("registered-client")
+	_, baseURL := startTestServer(t, cfg)
+
+	body, _ := json.Marshal(pollmux.ConnectRequest{
+		ProtocolVersion: pollmux.ProtocolVersion,
+		Meta:            map[string]string{"client_id": "unknown-client"},
+	})
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/connect", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testClientToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status %d, want 403", resp.StatusCode)
+	}
+}
+
 func TestCloseSessionReturns410(t *testing.T) {
-	token := strings.Repeat("t", 32)
-	cfg := testServerConfig(token)
+	const clientID = "c1"
+	cfg := testServerConfig(clientID)
 	srv, baseURL := startTestServer(t, cfg)
 
 	body, _ := json.Marshal(pollmux.ConnectRequest{
 		ProtocolVersion: pollmux.ProtocolVersion,
-		Meta:            map[string]string{"client_id": "c1"},
+		Meta:            map[string]string{"client_id": clientID},
 	})
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/connect", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+testClientToken)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ := http.DefaultClient.Do(req)
 	var cr pollmux.ConnectResponse
@@ -164,7 +208,7 @@ func TestCloseSessionReturns410(t *testing.T) {
 	_ = sess.Close()
 
 	pollReq, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/"+cr.SessionID+"/poll", nil)
-	pollReq.Header.Set("Authorization", "Bearer "+token)
+	pollReq.Header.Set("Authorization", "Bearer "+testClientToken)
 	pollReq.Header.Set("X-Receive-Only", "true")
 	pollResp, _ := http.DefaultClient.Do(pollReq)
 	pollResp.Body.Close()

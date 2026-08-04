@@ -24,7 +24,7 @@ func (s *Server) setupTLS() (*autocert.Manager, error) {
 		Cache:      autocert.DirCache(s.cfg.TLS.CacheDir),
 		Prompt:     autocert.AcceptTOS,
 		Email:      s.cfg.TLS.Email,
-		HostPolicy: router.HostPolicyFunc(s.registry, s.cfg.RootDomain, s.cfg.ControlHost),
+		HostPolicy: router.HostPolicyFunc(s.registry, s.cfg.RootDomain),
 	}
 	s.certManager = m
 	return m, nil
@@ -52,8 +52,8 @@ func httpsRedirectHandler(_ string) http.Handler {
 }
 
 func buildRouteTable(cfg *config.ServerConfig, reg *registry.Registry) (*router.RouteTable, error) {
-	for _, b := range cfg.Tunnels {
+	for _, b := range cfg.Clients {
 		reg.EnsurePool(b.Subdomain)
 	}
-	return router.NewRouteTable(cfg.Tunnels, reg)
+	return router.NewRouteTable(cfg.Clients, reg)
 }

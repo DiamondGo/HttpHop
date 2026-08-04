@@ -8,26 +8,29 @@ import (
 	"github.com/DiamondGo/HttpHop/internal/config"
 )
 
-type TokenStore struct {
-	byToken map[string]*config.TunnelBinding
+type ClientRegistry struct {
+	byID map[string]*config.ClientBinding
 }
 
-func NewTokenStore(bindings []config.TunnelBinding) *TokenStore {
-	m := make(map[string]*config.TunnelBinding, len(bindings))
+func NewClientRegistry(bindings []config.ClientBinding) *ClientRegistry {
+	m := make(map[string]*config.ClientBinding, len(bindings))
 	for i := range bindings {
 		b := &bindings[i]
-		m[b.Token] = b
+		m[b.ClientID] = b
 	}
-	return &TokenStore{byToken: m}
+	return &ClientRegistry{byID: m}
 }
 
-func (ts *TokenStore) Lookup(token string) (*config.TunnelBinding, bool) {
-	for stored, binding := range ts.byToken {
-		if subtle.ConstantTimeCompare([]byte(stored), []byte(token)) == 1 {
-			return binding, true
-		}
+func (cr *ClientRegistry) Lookup(clientID string) (*config.ClientBinding, bool) {
+	b, ok := cr.byID[clientID]
+	return b, ok
+}
+
+func validToken(expected, provided string) bool {
+	if expected == "" || provided == "" {
+		return false
 	}
-	return nil, false
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(provided)) == 1
 }
 
 func bearerToken(r *http.Request) string {

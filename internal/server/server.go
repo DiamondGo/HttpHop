@@ -29,7 +29,7 @@ type Server struct {
 	routes       *router.RouteTable
 	pollmuxCfg   pollmux.ServerConfig
 	hooks        pollmux.Hooks
-	auth         *TokenStore
+	clients      *ClientRegistry
 	proxy        *httputil.ReverseProxy
 	controlMux   *mux.Router
 	certManager  *autocert.Manager
@@ -68,7 +68,7 @@ func NewServer(cfg *config.ServerConfig, logger *zap.Logger) (*Server, error) {
 		sessionStore: pollmux.NewSessionStore(),
 		routes:       routes,
 		pollmuxCfg:   pollmuxCfg,
-		auth:         NewTokenStore(cfg.Tunnels),
+		clients:      NewClientRegistry(cfg.Clients),
 		logger:       logger,
 		done:         make(chan struct{}),
 	}
@@ -79,13 +79,11 @@ func NewServer(cfg *config.ServerConfig, logger *zap.Logger) (*Server, error) {
 }
 
 func (s *Server) buildControlMux() *mux.Router {
+	prefix := config.NormalizeControlPath(s.cfg.ControlPath)
 	m := mux.NewRouter()
-	m.Handle("/tunnel/connect", pollmux.ConnectHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodPost)
-	m.Handle("/tunnel/{id}/poll", pollmux.PollHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodPost)
-	m.Handle("/tunnel/{id}", pollmux.DeleteHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodDelete)
-	if s.cfg.Status.Enabled {
-		m.HandleFunc("/status", s.handleStatus).Methods(http.MethodGet)
-	}
+	m.Handle(prefix+"/connect", pollmux.ConnectHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodPost)
+	m.Handle(prefix+"/{id}/poll", pollmux.PollHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodPost)
+	m.Handle(prefix+"/{id}", pollmux.DeleteHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodDelete)
 	return m
 }
 
@@ -100,8 +98,7 @@ func (s *Server) buildHooks() pollmux.Hooks {
 
 func (s *Server) authenticateConnect(r *http.Request, req pollmux.ConnectRequest) (map[string]string, error) {
 	token := bearerToken(r)
-	binding, ok := s.auth.Lookup(token)
-	if !ok {
+	if token == "" {
 		return nil, pollmux.StatusErrorf(http.StatusUnauthorized, "invalid token")
 	}
 
@@ -111,6 +108,14 @@ func (s *Server) authenticateConnect(r *http.Request, req pollmux.ConnectRequest
 	}
 	if clientID == "" {
 		return nil, pollmux.StatusErrorf(http.StatusBadRequest, "client_id is required in meta")
+	}
+
+	binding, ok := s.clients.Lookup(clientID)
+	if !ok {
+		return nil, pollmux.StatusErrorf(http.StatusForbidden, "unknown client_id")
+	}
+	if !validToken(binding.Token, token) {
+		return nil, pollmux.StatusErrorf(http.StatusUnauthorized, "invalid token")
 	}
 
 	pool, _ := s.registry.Pool(binding.Subdomain)
@@ -131,16 +136,15 @@ func (s *Server) onConnect(session *pollmux.Session, meta map[string]string) err
 		return err
 	}
 
-	sub := meta["subdomain"]
 	clientID := meta["client_id"]
-	binding, ok := s.lookupBindingBySubdomain(sub)
+	binding, ok := s.clients.Lookup(clientID)
 	if !ok {
-		return fmt.Errorf("unknown subdomain %q", sub)
+		return fmt.Errorf("unknown client_id %q", clientID)
 	}
 
 	tun := &registry.ClientTunnel{
 		ID:          clientID,
-		Subdomain:   sub,
+		Subdomain:   binding.Subdomain,
 		Session:     session,
 		Yamux:       yamuxSess,
 		ConnectedAt: time.Now(),
@@ -156,11 +160,11 @@ func (s *Server) onConnect(session *pollmux.Session, meta map[string]string) err
 	}
 
 	s.logger.Info("client connected",
-		zap.String("subdomain", sub),
+		zap.String("subdomain", binding.Subdomain),
 		zap.String("client_id", clientID),
 		zap.String("session_id", session.ID))
 
-	s.warmCert(sub)
+	s.warmCert(binding.Subdomain)
 	return nil
 }
 
@@ -188,15 +192,6 @@ func (s *Server) onDisconnect(session *pollmux.Session, reason pollmux.Disconnec
 		}
 	}
 	s.registry.RemoveBySessionID(session.ID)
-}
-
-func (s *Server) lookupBindingBySubdomain(sub string) (*config.TunnelBinding, bool) {
-	for i := range s.cfg.Tunnels {
-		if s.cfg.Tunnels[i].Subdomain == sub {
-			return &s.cfg.Tunnels[i], true
-		}
-	}
-	return nil, false
 }
 
 func remoteAddrFromSession(_ *pollmux.Session) string {

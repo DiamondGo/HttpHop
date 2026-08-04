@@ -5,8 +5,13 @@
 # Go
 /vendor/
 
-# Local config overrides
-configs/*.local.yaml
+# Working yaml configs
+configs/local/
+
+# Client auth tokens (never commit real secrets)
+configs/secrets/
+!configs/examples/secrets/
+!configs/examples/secrets/*.token.example
 
 # TLS / cert cache
 /var/

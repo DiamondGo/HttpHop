@@ -32,16 +32,20 @@ func startEcho(t *testing.T) (string, func()) {
 	return strings.TrimPrefix(srv.URL, "http://"), srv.Close
 }
 
+const integrationClientToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func integrationSetup(t *testing.T) (serverURL string, publicHost string, cleanup func()) {
-	return integrationSetupDomain(t, "httphop.io", "tunnel.httphop.io", []config.TunnelBinding{
+	return integrationSetupDomain(t, "httphop.io", []config.ClientBinding{
 		{
+			ClientID:    "test-apex",
 			Subdomain:   "@",
 			PathPrefix:  "/service",
 			StripPrefix: true,
-			Token:       strings.Repeat("a", 32),
+			Token:       integrationClientToken,
 			MaxClients:  1,
 		},
 		{
+			ClientID:   "test-myapp",
 			Subdomain:  "myapp",
 			Token:      strings.Repeat("b", 32),
 			MaxClients: 1,
@@ -51,25 +55,24 @@ func integrationSetup(t *testing.T) (serverURL string, publicHost string, cleanu
 
 // integrationSetupDomain starts an in-process server + client for the given domain
 // layout. publicHost for apex routing is rootDomain.
-func integrationSetupDomain(t *testing.T, rootDomain, controlHost string, tunnels []config.TunnelBinding) (serverURL string, publicHost string, cleanup func()) {
+func integrationSetupDomain(t *testing.T, rootDomain string, clients []config.ClientBinding) (serverURL string, publicHost string, cleanup func()) {
 	t.Helper()
 	echoAddr, closeEcho := startEcho(t)
-	return integrationSetupDomainWithLocal(t, rootDomain, controlHost, tunnels, echoAddr, closeEcho)
+	return integrationSetupDomainWithLocal(t, rootDomain, clients, echoAddr, closeEcho)
 }
 
-func integrationSetupDomainWithLocal(t *testing.T, rootDomain, controlHost string, tunnels []config.TunnelBinding, localAddr string, closeLocal func()) (serverURL string, publicHost string, cleanup func()) {
+func integrationSetupDomainWithLocal(t *testing.T, rootDomain string, clients []config.ClientBinding, localAddr string, closeLocal func()) (serverURL string, publicHost string, cleanup func()) {
 	t.Helper()
 
 	logger := zap.NewNop()
 	srvCfg := config.Defaults()
 	srvCfg.RootDomain = rootDomain
-	srvCfg.ControlHost = controlHost
 	srvCfg.TLS.Disable = true
 	srvCfg.Tunnel.PollTimeout = 500 * time.Millisecond
 	srvCfg.Tunnel.SessionTimeout = 2 * srvCfg.Tunnel.PollTimeout
 	srvCfg.Tunnel.SweepInterval = 100 * time.Millisecond
 	srvCfg.Status.Enabled = false
-	srvCfg.Tunnels = tunnels
+	srvCfg.Clients = clients
 
 	srv, err := server.NewServer(&srvCfg, logger)
 	if err != nil {
@@ -84,11 +87,10 @@ func integrationSetupDomainWithLocal(t *testing.T, rootDomain, controlHost strin
 	}
 	serverURL = "http://" + ln.Addr().String()
 
-	token := tunnels[0].Token
 	cliCfg := config.DefaultClient()
-	cliCfg.ClientID = "test-client"
+	cliCfg.ClientID = clients[0].ClientID
 	cliCfg.Server.URL = serverURL
-	cliCfg.Server.Token = token
+	cliCfg.Server.Token = clients[0].Token
 	cliCfg.Server.InsecureSkipVerify = true
 	cliCfg.Local.Target = localAddr
 	cliCfg.Health.Enabled = true
@@ -165,7 +167,7 @@ func TestIntegrationSubdomainRoute(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
-		// myapp tunnel uses different token - client connected to @ tunnel only
+		// myapp route has no connected client (only test-apex is online)
 		// This test validates 503 when no backend for myapp
 		return
 	}
@@ -193,13 +195,13 @@ func TestIntegrationXForwardedFor(t *testing.T) {
 // an internal client on 127.0.0.1 exposes a local HTTP service through the
 // public apex path builderrors.com/service/* (strip_prefix → /* on localhost).
 func TestIntegrationBuilderrorsApexServicePath(t *testing.T) {
-	token := strings.Repeat("c", 32)
-	serverURL, publicHost, cleanup := integrationSetupDomain(t, "builderrors.com", "tunnel.builderrors.com", []config.TunnelBinding{
+	serverURL, publicHost, cleanup := integrationSetupDomain(t, "builderrors.com", []config.ClientBinding{
 		{
+			ClientID:    "builderrors-apex",
 			Subdomain:   "@",
 			PathPrefix:  "/service",
 			StripPrefix: true,
-			Token:       token,
+			Token:       integrationClientToken,
 			MaxClients:  1,
 		},
 	})
@@ -278,14 +280,14 @@ func startRedirectBackend(t *testing.T) (string, func()) {
 }
 
 func TestIntegrationBuilderrorsRedirectAndCookie(t *testing.T) {
-	token := strings.Repeat("e", 32)
 	localAddr, closeLocal := startRedirectBackend(t)
-	serverURL, publicHost, cleanup := integrationSetupDomainWithLocal(t, "builderrors.com", "tunnel.builderrors.com", []config.TunnelBinding{
+	serverURL, publicHost, cleanup := integrationSetupDomainWithLocal(t, "builderrors.com", []config.ClientBinding{
 		{
+			ClientID:    "builderrors-apex",
 			Subdomain:   "@",
 			PathPrefix:  "/service",
 			StripPrefix: true,
-			Token:       token,
+			Token:       integrationClientToken,
 			MaxClients:  1,
 		},
 	}, localAddr, closeLocal)
@@ -324,13 +326,13 @@ func TestIntegrationBuilderrorsRedirectAndCookie(t *testing.T) {
 }
 
 func TestIntegrationBuilderrorsServicePostBody(t *testing.T) {
-	token := strings.Repeat("d", 32)
-	serverURL, publicHost, cleanup := integrationSetupDomain(t, "builderrors.com", "tunnel.builderrors.com", []config.TunnelBinding{
+	serverURL, publicHost, cleanup := integrationSetupDomain(t, "builderrors.com", []config.ClientBinding{
 		{
+			ClientID:    "builderrors-apex",
 			Subdomain:   "@",
 			PathPrefix:  "/service",
 			StripPrefix: true,
-			Token:       token,
+			Token:       integrationClientToken,
 			MaxClients:  1,
 		},
 	})

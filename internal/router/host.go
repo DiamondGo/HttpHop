@@ -53,15 +53,10 @@ type HostLister interface {
 	Subdomains() []string
 }
 
-func AllowedHosts(reg HostLister, root, controlHost string) func(string) bool {
+func AllowedHosts(reg HostLister, root string) func(string) bool {
 	return func(host string) bool {
 		host = stripPort(strings.ToLower(host))
-		controlHost = strings.ToLower(controlHost)
 		root = strings.ToLower(root)
-
-		if host == controlHost {
-			return true
-		}
 
 		key, err := HostKey(host, root)
 		if err != nil {
@@ -81,8 +76,8 @@ func AllowedHosts(reg HostLister, root, controlHost string) func(string) bool {
 	}
 }
 
-func HostPolicyFunc(reg HostLister, root, controlHost string) autocert.HostPolicy {
-	allowed := AllowedHosts(reg, root, controlHost)
+func HostPolicyFunc(reg HostLister, root string) autocert.HostPolicy {
+	allowed := AllowedHosts(reg, root)
 	return func(_ context.Context, host string) error {
 		if allowed(host) {
 			return nil

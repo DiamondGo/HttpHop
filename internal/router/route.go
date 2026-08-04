@@ -57,7 +57,7 @@ func StripPathPrefix(pathStr, prefix string) (newPath string, ok bool) {
 	return pathStr, false
 }
 
-func NewRouteTable(bindings []config.TunnelBinding, reg *registry.Registry) (*RouteTable, error) {
+func NewRouteTable(bindings []config.ClientBinding, reg *registry.Registry) (*RouteTable, error) {
 	rt := &RouteTable{byHost: make(map[string]*hostRoutes)}
 
 	for _, b := range bindings {
@@ -122,7 +122,7 @@ func (t *RouteTable) HostKeys() []string {
 	return keys
 }
 
-func BindingHostKeys(bindings []config.TunnelBinding) []string {
+func BindingHostKeys(bindings []config.ClientBinding) []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, b := range bindings {

@@ -1,6 +1,7 @@
 package router_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/DiamondGo/HttpHop/internal/config"
@@ -8,17 +9,12 @@ import (
 	"github.com/DiamondGo/HttpHop/internal/router"
 )
 
-func newTestRegistry(t *testing.T) *registry.Registry {
-	t.Helper()
-	return registry.NewRegistry()
-}
-
-func TestRouteTableMatch(t *testing.T) {
-	reg := newTestRegistry(t)
-	bindings := []config.TunnelBinding{
-		{Subdomain: "@", PathPrefix: "/service", StripPrefix: true, Token: "token-a"},
-		{Subdomain: "@", PathPrefix: "/api/v1", StripPrefix: true, Token: "token-b"},
-		{Subdomain: "myapp", Token: "token-c"},
+func TestRouteTableLongestPrefix(t *testing.T) {
+	reg := registry.NewRegistry()
+	bindings := []config.ClientBinding{
+		{ClientID: "a", Subdomain: "@", PathPrefix: "/service", StripPrefix: true},
+		{ClientID: "b", Subdomain: "@", PathPrefix: "/api/v1", StripPrefix: true},
+		{ClientID: "c", Subdomain: "myapp"},
 	}
 	rt, err := router.NewRouteTable(bindings, reg)
 	if err != nil {
@@ -29,7 +25,7 @@ func TestRouteTableMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.PathPrefix != "/service" || !r.Strip {
+	if !r.Strip || r.PathPrefix != "/service" {
 		t.Fatalf("unexpected route: %+v", r)
 	}
 
@@ -38,19 +34,19 @@ func TestRouteTableMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if r.PathPrefix != "/api/v1" {
-		t.Fatalf("expected /api/v1 route, got %q", r.PathPrefix)
+		t.Fatalf("prefix = %q", r.PathPrefix)
 	}
 
-	r, err = rt.Match("myapp", "/foo")
+	r, err = rt.Match("myapp", "/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.PathPrefix != "" {
-		t.Fatalf("expected fallback route")
+	if r.HostKey != "myapp" {
+		t.Fatalf("host = %q", r.HostKey)
 	}
 
-	_, err = rt.Match("@", "/unknown")
-	if err == nil {
-		t.Fatal("expected no route")
+	_, err = rt.Match("@", "/other")
+	if !errors.Is(err, router.ErrNoRoute) {
+		t.Fatalf("expected ErrNoRoute, got %v", err)
 	}
 }

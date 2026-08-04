@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "configs/server.example.yaml", "path to server config")
+	configPath := flag.String("config", "configs/local/server.yaml", "path to server config")
 	flag.Parse()
 
 	cfg, err := config.LoadServer(*configPath)

@@ -1,7 +1,10 @@
+# Local dev: TLS off, httphop listens on :8443.
+# Copy to configs/local/ — see configs/README.md
+
 public_listen: ":443"
 http_listen: ":80"
 root_domain: "httphop.io"
-control_host: "tunnel.httphop.io"
+control_path: "/tunnel"
 
 tls:
   cache_dir: "/var/lib/httphop/certs"
@@ -25,20 +28,15 @@ proxy:
   read_header_timeout: 10s
   max_header_bytes: 65536
 
-tunnels:
-  # Recommended: whole subdomain → local service (paths unchanged).
-  # DNS: myapp.httphop.io → this Server.
-  - subdomain: "myapp"
-    token: "REPLACE_WITH_32B_RANDOM_TOKEN_BBBB0000"
+clients:
+  - client_id: "home-gpu-01"
+    subdomain: "myapp"
+    token_file: "../secrets/home-gpu-01.token"
     max_clients: 1
 
-  # Optional: apex path prefix (example.com/service/* → /* on localhost).
-  # HttpHop rewrites Location and Set-Cookie Path; HTML/static assets may
-  # still need app base-path config. Prefer subdomain mapping when possible.
-  # - subdomain: "@"
-  #   path_prefix: "/service"
-  #   strip_prefix: true
-  #   token: "REPLACE_WITH_32B_RANDOM_TOKEN_AAAA0000"
+  # - client_id: "home-blog-01"
+  #   subdomain: "blog"
+  #   token_file: "../secrets/home-blog-01.token"
   #   max_clients: 1
 
 status:

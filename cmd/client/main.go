@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "configs/client.example.yaml", "path to client config")
+	configPath := flag.String("config", "configs/local/client.yaml", "path to client config")
 	flag.Parse()
 
 	cfg, err := config.LoadClient(*configPath)

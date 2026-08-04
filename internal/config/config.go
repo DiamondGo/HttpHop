@@ -14,12 +14,12 @@ type ServerConfig struct {
 	PublicListen string          `mapstructure:"public_listen"`
 	HTTPListen   string          `mapstructure:"http_listen"`
 	RootDomain   string          `mapstructure:"root_domain"`
-	ControlHost  string          `mapstructure:"control_host"`
+	ControlPath  string          `mapstructure:"control_path"`
 	DevListen    string          `mapstructure:"dev_listen"`
 	TLS          TLSConfig       `mapstructure:"tls"`
 	Tunnel       TunnelConfig    `mapstructure:"tunnel"`
 	Proxy        ProxyConfig     `mapstructure:"proxy"`
-	Tunnels      []TunnelBinding `mapstructure:"tunnels"`
+	Clients      []ClientBinding `mapstructure:"clients"`
 	Status       StatusConfig    `mapstructure:"status"`
 	Logging      LoggingConfig   `mapstructure:"logging"`
 }
@@ -48,11 +48,13 @@ type ProxyConfig struct {
 	MaxHeaderBytes        int           `mapstructure:"max_header_bytes"`
 }
 
-type TunnelBinding struct {
+type ClientBinding struct {
+	ClientID    string `mapstructure:"client_id"`
 	Subdomain   string `mapstructure:"subdomain"`
 	PathPrefix  string `mapstructure:"path_prefix"`
 	StripPrefix bool   `mapstructure:"strip_prefix"`
-	Token       string `mapstructure:"token"`
+	TokenFile   string `mapstructure:"token_file"`
+	Token       string `mapstructure:"-"` // loaded from token_file at startup
 	MaxClients  int    `mapstructure:"max_clients"`
 }
 
@@ -77,6 +79,8 @@ type ClientConfig struct {
 type ServerRef struct {
 	URL                string `mapstructure:"url"`
 	Token              string `mapstructure:"token"`
+	TokenFile          string `mapstructure:"token_file"`
+	ControlPath        string `mapstructure:"control_path"`
 	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
 }
 
@@ -106,6 +110,7 @@ func Defaults() ServerConfig {
 	return ServerConfig{
 		PublicListen: ":443",
 		HTTPListen:   ":80",
+		ControlPath:  "/tunnel",
 		DevListen:    ":8443",
 		Tunnel: TunnelConfig{
 			PollTimeout:         30 * time.Second,

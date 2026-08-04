@@ -1,14 +1,10 @@
-# Example: expose an internal app at myapp.builderrors.com
-#
-# Public Server: VPS with IP 203.0.113.10, domain builderrors.com on Cloudflare
-# Internal Client: home lab, service at 127.0.0.1:8080
-#
-# Copy to server.yaml / client.yaml and replace tokens.
+# Production-style: ai.builderrors.com, Client uses same host + /tunnel/* paths.
+# Copy to configs/local/ or /etc/httphop/ — see configs/README.md
 
 public_listen: ":443"
 http_listen: ":80"
 root_domain: "builderrors.com"
-control_host: "tunnel.builderrors.com"
+control_path: "/tunnel"
 
 tls:
   cache_dir: "/var/lib/httphop/certs"
@@ -23,10 +19,16 @@ tunnel:
 proxy:
   response_header_timeout: 60s
 
-tunnels:
-  - subdomain: "myapp"
-    token: "REPLACE_WITH_RANDOM_TOKEN_AT_LEAST_32_CHARS"
+clients:
+  - client_id: "myai"
+    subdomain: "ai"
+    token_file: "../secrets/myai.token"
     max_clients: 1
+
+  # - client_id: "myblog"
+  #   subdomain: "blog"
+  #   token_file: "../secrets/myblog.token"
+  #   max_clients: 1
 
 status:
   enabled: true

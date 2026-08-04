@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DiamondGo/HttpHop/internal/config"
 	"github.com/DiamondGo/HttpHop/internal/registry"
 	"github.com/DiamondGo/HttpHop/internal/router"
 )
@@ -121,18 +122,8 @@ func stripPort(host string) string {
 	return h
 }
 
-func controlHostMatch(host, controlHost string) bool {
-	return strings.EqualFold(stripPort(host), controlHost)
-}
-
 func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 	if s.isControlPath(r.URL.Path) {
-		if controlHostMatch(r.Host, s.cfg.ControlHost) || s.cfg.TLS.Disable {
-			s.controlMux.ServeHTTP(w, r)
-			return
-		}
-	}
-	if controlHostMatch(r.Host, s.cfg.ControlHost) {
 		s.controlMux.ServeHTTP(w, r)
 		return
 	}
@@ -140,7 +131,8 @@ func (s *Server) rootHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) isControlPath(p string) bool {
-	return p == "/status" || strings.HasPrefix(p, "/tunnel")
+	prefix := config.NormalizeControlPath(s.cfg.ControlPath)
+	return p == prefix || strings.HasPrefix(p, prefix+"/")
 }
 
 func (s *Server) publicListenAddr() string {

@@ -66,6 +66,7 @@ func (c *Client) buildConnector(logger *slog.Logger) *pollmux.Connector {
 	}
 	return &pollmux.Connector{
 		BaseURL:            c.cfg.Server.URL,
+		PathPrefix:         c.cfg.Server.ControlPath,
 		AuthToken:          c.cfg.Server.Token,
 		Meta:               map[string]string{"client_id": c.cfg.ClientID},
 		PollInterval:       c.cfg.Transport.PollInterval,
