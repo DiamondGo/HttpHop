@@ -83,6 +83,7 @@ func (s *Server) buildControlMux() *mux.Router {
 	m := mux.NewRouter()
 	m.Handle(prefix+"/connect", pollmux.ConnectHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodPost)
 	m.Handle(prefix+"/{id}/poll", pollmux.PollHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodPost)
+	m.Handle(prefix+"/{id}/ws", pollmux.WebSocketHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodGet)
 	m.Handle(prefix+"/{id}", pollmux.DeleteHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodDelete)
 	return m
 }
@@ -297,9 +298,9 @@ func (s *Server) Stop(ctx context.Context) error {
 	return errOut
 }
 
-func (s *Server) Registry() *registry.Registry { return s.registry }
+func (s *Server) Registry() *registry.Registry        { return s.registry }
 func (s *Server) SessionStore() *pollmux.SessionStore { return s.sessionStore }
-func (s *Server) Config() *config.ServerConfig { return s.cfg }
+func (s *Server) Config() *config.ServerConfig        { return s.cfg }
 
 func (s *Server) RootHandler() http.HandlerFunc {
 	return s.rootHandler

@@ -65,18 +65,22 @@ func (c *Client) buildConnector(logger *slog.Logger) *pollmux.Connector {
 		localHealth = c.health.Healthy
 	}
 	return &pollmux.Connector{
-		BaseURL:            c.cfg.Server.URL,
-		PathPrefix:         c.cfg.Server.ControlPath,
-		AuthToken:          c.cfg.Server.Token,
-		Meta:               map[string]string{"client_id": c.cfg.ClientID},
-		PollInterval:       c.cfg.Transport.PollInterval,
-		PollGrace:          c.cfg.Transport.PollGrace,
-		SendTimeout:        c.cfg.Transport.SendTimeout,
-		CoalesceWindow:     c.cfg.Transport.CoalesceWindow,
-		MaxSendChunk:       c.cfg.Transport.MaxSendChunk,
-		LocalHealth:        localHealth,
-		InsecureSkipVerify: c.cfg.Server.InsecureSkipVerify,
-		Logger:             logger,
+		BaseURL:                c.cfg.Server.URL,
+		PathPrefix:             c.cfg.Server.ControlPath,
+		AuthToken:              c.cfg.Server.Token,
+		Meta:                   map[string]string{"client_id": c.cfg.ClientID},
+		PollInterval:           c.cfg.Transport.PollInterval,
+		PollGrace:              c.cfg.Transport.PollGrace,
+		SendTimeout:            c.cfg.Transport.SendTimeout,
+		CoalesceWindow:         c.cfg.Transport.CoalesceWindow,
+		MaxSendChunk:           c.cfg.Transport.MaxSendChunk,
+		PreferStream:           c.cfg.Transport.PreferStream,
+		UploadStreamPreference: c.cfg.Transport.UploadStreamPreference,
+		UploadProbeTimeout:     c.cfg.Transport.UploadProbeTimeout,
+		PreferWebSocket:        c.cfg.Transport.PreferWebSocket,
+		LocalHealth:            localHealth,
+		InsecureSkipVerify:     c.cfg.Server.InsecureSkipVerify,
+		Logger:                 logger,
 	}
 }
 

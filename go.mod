@@ -3,7 +3,7 @@ module github.com/DiamondGo/HttpHop
 go 1.25.0
 
 require (
-	github.com/DiamondGo/pollmux v0.0.0-20260803170208-daa0d2bb4b3b
+	github.com/DiamondGo/pollmux v0.1.4
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/yamux v0.1.2
 	github.com/spf13/viper v1.19.0
@@ -13,6 +13,7 @@ require (
 )
 
 require (
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect

@@ -14,6 +14,10 @@ local:
 transport:
   poll_interval: 0s
   poll_grace: 10s
+  # Pair with the server's stream/websocket options above:
+  # prefer_stream: true               # ask for stream-mode download polling
+  # upload_stream_preference: ""      # "" = auto-probe, "stream" = force, "batch" = never
+  # prefer_websocket: true            # ask to attach over a single WebSocket instead
 
 health:
   enabled: true

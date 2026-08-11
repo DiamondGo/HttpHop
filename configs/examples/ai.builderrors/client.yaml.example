@@ -18,6 +18,9 @@ local:
 transport:
   poll_interval: 0s
   poll_grace: 10s
+  # See server.yaml.example's note on Cloudflare + stream mode. If the server
+  # enables enable_websocket, opt in here rather than prefer_stream:
+  # prefer_websocket: true
 
 health:
   enabled: true

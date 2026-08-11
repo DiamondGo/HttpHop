@@ -22,6 +22,12 @@ tunnel:
   high_water_warn: 0
   poll_mode: "batch"
   max_streams_per_tunnel: 256
+  # Stream mode + WebSocket transport (pollmux >= v0.1.0). Loopback has no
+  # intermediate proxy to worry about, so this is a safe place to try them:
+  # poll_mode: "stream"        # replaces long-poll batching with a held-open response
+  # heartbeat_interval: 10s    # idle time before a stream poll sends a heartbeat frame
+  # stream_max_duration: 45s   # forced rollover of one stream leg; must be >= 2x heartbeat_interval
+  # enable_websocket: true     # let clients attach over a single WebSocket instead of polling
 
 proxy:
   response_header_timeout: 60s

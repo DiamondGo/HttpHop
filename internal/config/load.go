@@ -81,6 +81,12 @@ func applyServerDefaults(cfg *ServerConfig) {
 	if cfg.Tunnel.PollMode == "" {
 		cfg.Tunnel.PollMode = d.Tunnel.PollMode
 	}
+	if cfg.Tunnel.HeartbeatInterval == 0 {
+		cfg.Tunnel.HeartbeatInterval = d.Tunnel.HeartbeatInterval
+	}
+	if cfg.Tunnel.StreamMaxDuration == 0 {
+		cfg.Tunnel.StreamMaxDuration = d.Tunnel.StreamMaxDuration
+	}
 	if cfg.Tunnel.MaxStreamsPerTunnel == 0 {
 		cfg.Tunnel.MaxStreamsPerTunnel = d.Tunnel.MaxStreamsPerTunnel
 	}
@@ -163,8 +169,14 @@ func ValidateServer(cfg *ServerConfig) error {
 	if pollMode == "" {
 		pollMode = pollmux.PollModeBatch
 	}
-	if pollMode != pollmux.PollModeBatch {
-		return fmt.Errorf("poll_mode %q is not implemented; use %q", pollMode, pollmux.PollModeBatch)
+	switch pollMode {
+	case pollmux.PollModeBatch, pollmux.PollModeStream:
+	default:
+		return fmt.Errorf("poll_mode %q is invalid; must be %q or %q", pollMode, pollmux.PollModeBatch, pollmux.PollModeStream)
+	}
+	if pollMode == pollmux.PollModeStream && cfg.Tunnel.StreamMaxDuration < 2*cfg.Tunnel.HeartbeatInterval {
+		return fmt.Errorf("tunnel.stream_max_duration (%v) must be >= 2 × tunnel.heartbeat_interval (%v)",
+			cfg.Tunnel.StreamMaxDuration, cfg.Tunnel.HeartbeatInterval)
 	}
 	if len(cfg.Clients) == 0 {
 		return fmt.Errorf("at least one client binding is required")
@@ -273,6 +285,12 @@ func ValidateClient(cfg *ClientConfig) error {
 		default:
 			return fmt.Errorf("health.mode must be tcp or http")
 		}
+	}
+	switch cfg.Transport.UploadStreamPreference {
+	case "", pollmux.PollModeBatch, pollmux.PollModeStream:
+	default:
+		return fmt.Errorf("transport.upload_stream_preference %q is invalid; must be \"\", %q, or %q",
+			cfg.Transport.UploadStreamPreference, pollmux.PollModeBatch, pollmux.PollModeStream)
 	}
 	return nil
 }

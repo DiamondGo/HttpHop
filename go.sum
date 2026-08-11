@@ -1,5 +1,7 @@
-github.com/DiamondGo/pollmux v0.0.0-20260803170208-daa0d2bb4b3b h1:DoPWPR/2rXTCmRSuy8/iy9Bqx08Opbx+kfN8ZPGgx2c=
-github.com/DiamondGo/pollmux v0.0.0-20260803170208-daa0d2bb4b3b/go.mod h1:7I9B+AjZ7KhkUXc1/MaWWFxZc2YJ3+WkrFF8a2l1ib4=
+github.com/DiamondGo/pollmux v0.1.4 h1:TYdt2ULiTXXmRYpqW1Y2PzVfCxZt5LZ1onKMIzaV87M=
+github.com/DiamondGo/pollmux v0.1.4/go.mod h1:NTnsxxc1ayW9f0gdUr160544aPC6i7xJGfoOXd3M560=
+github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
+github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=

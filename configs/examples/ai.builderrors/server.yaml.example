@@ -28,6 +28,16 @@ tunnel:
   session_timeout: 60s
   sweep_interval: 5s
   max_streams_per_tunnel: 256
+  # Stream mode / WebSocket transport (pollmux >= v0.1.0): left off here on
+  # purpose. This deployment sits behind Cloudflare, and Cloudflare's
+  # non-Enterprise tiers buffer a long-held HTTP request/response body
+  # instead of forwarding it live — enabling poll_mode: "stream" (or letting
+  # the client's upload_stream_preference auto-probe) can leave a tunnel
+  # silently hung with no error, since the probe itself isn't reliable on
+  # this kind of link. If you want the throughput win on a Cloudflare-fronted
+  # deployment, use WebSocket transport instead (Cloudflare forwards
+  # WebSocket frames live regardless of plan):
+  # enable_websocket: true
 
 proxy:
   response_header_timeout: 60s
@@ -58,6 +68,12 @@ logging:
 #           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 #           proxy_read_timeout 120s;
 #           proxy_buffering off;
+#           # Only needed if tunnel.enable_websocket is turned on above —
+#           # without these, nginx answers the /tunnel/{id}/ws upgrade
+#           # request as plain HTTP instead of passing it through.
+#           proxy_http_version 1.1;
+#           proxy_set_header Upgrade $http_upgrade;
+#           proxy_set_header Connection "upgrade";
 #       }
 #   }
 #

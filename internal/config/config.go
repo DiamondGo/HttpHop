@@ -39,6 +39,9 @@ type TunnelConfig struct {
 	MaxSendBytes        int           `mapstructure:"max_send_bytes"`
 	HighWaterWarn       int           `mapstructure:"high_water_warn"`
 	PollMode            string        `mapstructure:"poll_mode"`
+	HeartbeatInterval   time.Duration `mapstructure:"heartbeat_interval"`
+	StreamMaxDuration   time.Duration `mapstructure:"stream_max_duration"`
+	EnableWebSocket     bool          `mapstructure:"enable_websocket"`
 	MaxStreamsPerTunnel int           `mapstructure:"max_streams_per_tunnel"`
 }
 
@@ -90,12 +93,16 @@ type LocalConfig struct {
 }
 
 type TransportConfig struct {
-	PollInterval   time.Duration `mapstructure:"poll_interval"`
-	PollGrace      time.Duration `mapstructure:"poll_grace"`
-	SendTimeout    time.Duration `mapstructure:"send_timeout"`
-	DialTimeout    time.Duration `mapstructure:"dial_timeout"`
-	CoalesceWindow time.Duration `mapstructure:"coalesce_window"`
-	MaxSendChunk   int           `mapstructure:"max_send_chunk"`
+	PollInterval           time.Duration `mapstructure:"poll_interval"`
+	PollGrace              time.Duration `mapstructure:"poll_grace"`
+	SendTimeout            time.Duration `mapstructure:"send_timeout"`
+	DialTimeout            time.Duration `mapstructure:"dial_timeout"`
+	CoalesceWindow         time.Duration `mapstructure:"coalesce_window"`
+	MaxSendChunk           int           `mapstructure:"max_send_chunk"`
+	PreferStream           bool          `mapstructure:"prefer_stream"`
+	UploadStreamPreference string        `mapstructure:"upload_stream_preference"`
+	UploadProbeTimeout     time.Duration `mapstructure:"upload_probe_timeout"`
+	PreferWebSocket        bool          `mapstructure:"prefer_websocket"`
 }
 
 type HealthConfig struct {
@@ -120,6 +127,8 @@ func Defaults() ServerConfig {
 			PollBufferSize:      256 << 10,
 			MaxSendBytes:        1 << 20,
 			PollMode:            pollmux.PollModeBatch,
+			HeartbeatInterval:   pollmux.DefaultHeartbeatInterval,
+			StreamMaxDuration:   pollmux.DefaultStreamMaxDuration,
 			MaxStreamsPerTunnel: 256,
 		},
 		Proxy: ProxyConfig{
@@ -143,6 +152,13 @@ func DefaultClient() ClientConfig {
 			DialTimeout:    10 * time.Second,
 			CoalesceWindow: 2 * time.Millisecond,
 			MaxSendChunk:   512 << 10,
+			// PreferStream/UploadStreamPreference/PreferWebSocket default to
+			// off ("", false): an old-server/new-client pair negotiates down
+			// to plain batch polling with no behavior change. Opt in per
+			// deployment once the link in front of the server (see server's
+			// enable_websocket / poll_mode) is known to support it — a
+			// buffering intermediate proxy (e.g. Cloudflare's non-Enterprise
+			// tiers) can silently hang a long-held upload request.
 		},
 		Health: HealthConfig{
 			Enabled:  true,
@@ -161,14 +177,17 @@ func (cfg ServerConfig) PollmuxServerConfig(logger *slog.Logger) pollmux.ServerC
 		pollMode = pollmux.PollModeBatch
 	}
 	return pollmux.ServerConfig{
-		PollTimeout:    cfg.Tunnel.PollTimeout,
-		SessionTimeout: cfg.Tunnel.SessionTimeout,
-		SweepInterval:  cfg.Tunnel.SweepInterval,
-		CoalesceWindow: cfg.Tunnel.CoalesceWindow,
-		PollBufferSize: cfg.Tunnel.PollBufferSize,
-		MaxSendBytes:   cfg.Tunnel.MaxSendBytes,
-		HighWaterWarn:  cfg.Tunnel.HighWaterWarn,
-		PollMode:       pollMode,
-		Logger:         logger,
+		PollTimeout:       cfg.Tunnel.PollTimeout,
+		SessionTimeout:    cfg.Tunnel.SessionTimeout,
+		SweepInterval:     cfg.Tunnel.SweepInterval,
+		CoalesceWindow:    cfg.Tunnel.CoalesceWindow,
+		PollBufferSize:    cfg.Tunnel.PollBufferSize,
+		MaxSendBytes:      cfg.Tunnel.MaxSendBytes,
+		HighWaterWarn:     cfg.Tunnel.HighWaterWarn,
+		PollMode:          pollMode,
+		HeartbeatInterval: cfg.Tunnel.HeartbeatInterval,
+		StreamMaxDuration: cfg.Tunnel.StreamMaxDuration,
+		EnableWebSocket:   cfg.Tunnel.EnableWebSocket,
+		Logger:            logger,
 	}
 }
