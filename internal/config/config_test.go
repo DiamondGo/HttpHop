@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DiamondGo/pollmux"
+
 	"github.com/DiamondGo/HttpHop/internal/config"
 )
 
@@ -161,5 +163,158 @@ func TestPollmuxServerConfigMapping(t *testing.T) {
 	pcfg := cfg.PollmuxServerConfig(nil)
 	if pcfg.PollTimeout != 30*time.Second {
 		t.Fatalf("poll timeout mismatch")
+	}
+}
+
+func TestPollModeStreamAccepted(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.RootDomain = "example.com"
+	cfg.Tunnel.PollMode = "stream"
+	cfg.Clients = []config.ClientBinding{{
+		ClientID:  "app-1",
+		Subdomain: "app",
+		Token:     strings.Repeat("a", 32),
+	}}
+	if err := config.ValidateServer(&cfg); err != nil {
+		t.Fatalf("expected stream poll_mode to validate, got %v", err)
+	}
+	pcfg := cfg.PollmuxServerConfig(nil)
+	if pcfg.PollMode != "stream" {
+		t.Fatalf("PollMode = %q, want stream", pcfg.PollMode)
+	}
+	if pcfg.HeartbeatInterval == 0 || pcfg.StreamMaxDuration == 0 {
+		t.Fatalf("expected heartbeat/stream-max-duration defaults to carry through, got %v/%v",
+			pcfg.HeartbeatInterval, pcfg.StreamMaxDuration)
+	}
+}
+
+func TestPollModeInvalidRejected(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.RootDomain = "example.com"
+	cfg.Tunnel.PollMode = "chunked"
+	cfg.Clients = []config.ClientBinding{{
+		ClientID:  "app-1",
+		Subdomain: "app",
+		Token:     strings.Repeat("a", 32),
+	}}
+	err := config.ValidateServer(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "poll_mode") {
+		t.Fatalf("expected poll_mode error, got %v", err)
+	}
+}
+
+func TestStreamMaxDurationTooCloseToHeartbeat(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.RootDomain = "example.com"
+	cfg.Tunnel.PollMode = "stream"
+	cfg.Tunnel.HeartbeatInterval = 10 * time.Second
+	cfg.Tunnel.StreamMaxDuration = 15 * time.Second
+	cfg.Clients = []config.ClientBinding{{
+		ClientID:  "app-1",
+		Subdomain: "app",
+		Token:     strings.Repeat("a", 32),
+	}}
+	err := config.ValidateServer(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "stream_max_duration") {
+		t.Fatalf("expected stream_max_duration error, got %v", err)
+	}
+}
+
+func TestLoadServerStreamDefaults(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte(strings.Repeat("a", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "server.yaml")
+	cfgBody := `root_domain: example.com
+tunnel:
+  poll_mode: stream
+clients:
+  - client_id: dev-1
+    subdomain: app
+    token_file: token
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadServer(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tunnel.HeartbeatInterval != pollmux.DefaultHeartbeatInterval {
+		t.Fatalf("HeartbeatInterval = %v, want default %v", cfg.Tunnel.HeartbeatInterval, pollmux.DefaultHeartbeatInterval)
+	}
+	if cfg.Tunnel.StreamMaxDuration != pollmux.DefaultStreamMaxDuration {
+		t.Fatalf("StreamMaxDuration = %v, want default %v", cfg.Tunnel.StreamMaxDuration, pollmux.DefaultStreamMaxDuration)
+	}
+	pcfg := cfg.PollmuxServerConfig(nil)
+	if pcfg.PollMode != pollmux.PollModeStream {
+		t.Fatalf("PollMode = %q, want stream", pcfg.PollMode)
+	}
+}
+
+func TestLoadServerStreamExplicitDurationsHonored(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte(strings.Repeat("a", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "server.yaml")
+	cfgBody := `root_domain: example.com
+tunnel:
+  poll_mode: stream
+  heartbeat_interval: 1s
+  stream_max_duration: 3s
+clients:
+  - client_id: dev-1
+    subdomain: app
+    token_file: token
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadServer(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tunnel.HeartbeatInterval != time.Second {
+		t.Fatalf("HeartbeatInterval = %v, want 1s", cfg.Tunnel.HeartbeatInterval)
+	}
+	if cfg.Tunnel.StreamMaxDuration != 3*time.Second {
+		t.Fatalf("StreamMaxDuration = %v, want 3s", cfg.Tunnel.StreamMaxDuration)
+	}
+}
+
+func TestEnableWebSocketMapping(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Tunnel.EnableWebSocket = true
+	pcfg := cfg.PollmuxServerConfig(nil)
+	if !pcfg.EnableWebSocket {
+		t.Fatal("expected EnableWebSocket to carry through to pollmux.ServerConfig")
+	}
+}
+
+func TestUploadStreamPreferenceValidation(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "secret.token")
+	token := strings.Repeat("c", 32)
+	if err := os.WriteFile(tokenPath, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "client.yaml")
+	cfgBody := `client_id: dev-1
+server:
+  url: http://127.0.0.1:1
+  token_file: secret.token
+local:
+  target: 127.0.0.1:8080
+transport:
+  upload_stream_preference: "bogus"
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := config.LoadClient(cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "upload_stream_preference") {
+		t.Fatalf("expected upload_stream_preference error, got %v", err)
 	}
 }

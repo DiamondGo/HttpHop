@@ -55,11 +55,39 @@ func (h *StreamHandler) Handle(stream net.Conn) {
 	}
 }
 
+// bridgeBidirectional copies both directions concurrently and waits for
+// both to finish before returning. Returning as soon as the first direction
+// finished (the previous behavior) raced the still-in-flight direction: for
+// a request whose response is still being written when the request body
+// side reaches a clean EOF (yamux's Stream.Close is a graceful per-direction
+// FIN, not a hard reset — see hashicorp/yamux's streamRemoteClose state —
+// so this EOF is a normal, common event, not an error condition), the
+// caller's deferred Close calls would tear down the connection mid-response
+// and truncate it. Waiting for both, and half-closing whichever side
+// supports it as its own direction finishes, lets the still-running
+// direction complete on its own terms instead.
 func bridgeBidirectional(a, b net.Conn) error {
 	errCh := make(chan error, 2)
-	go func() { _, err := io.Copy(b, a); errCh <- err }()
-	go func() { _, err := io.Copy(a, b); errCh <- err }()
-	err := <-errCh
+	go func() { errCh <- copyHalfClose(b, a) }()
+	go func() { errCh <- copyHalfClose(a, b) }()
+	err1 := <-errCh
+	err2 := <-errCh
+	if err1 != nil {
+		return err1
+	}
+	return err2
+}
+
+// copyHalfClose copies src into dst, then half-closes dst's write side if
+// it supports CloseWrite (e.g. *net.TCPConn does; a yamux.Stream does not
+// and this is a no-op there) so the peer sees a clean end of that direction
+// without dst's read side — and the other bridgeBidirectional goroutine
+// still reading from dst — being disturbed.
+func copyHalfClose(dst, src net.Conn) error {
+	_, err := io.Copy(dst, src)
+	if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
 	return err
 }
 
