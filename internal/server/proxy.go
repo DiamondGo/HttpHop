@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/DiamondGo/HttpHop/internal/config"
 	"github.com/DiamondGo/HttpHop/internal/registry"
 	"github.com/DiamondGo/HttpHop/internal/router"
@@ -106,10 +108,13 @@ func (s *Server) modifyProxyResponse(resp *http.Response) error {
 func (s *Server) proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
+		s.logger.Warn("proxy backend timeout", zap.String("path", r.URL.Path), zap.Error(err))
 		writeHTTPError(w, http.StatusGatewayTimeout, "backend timeout")
 	case errors.Is(err, errNoTunnel):
+		s.logger.Warn("proxy tunnel gone", zap.String("path", r.URL.Path), zap.Error(err))
 		writeHTTPError(w, http.StatusServiceUnavailable, "tunnel gone")
 	default:
+		s.logger.Warn("proxy backend error", zap.String("path", r.URL.Path), zap.Error(err))
 		writeHTTPError(w, http.StatusBadGateway, "backend error")
 	}
 }
