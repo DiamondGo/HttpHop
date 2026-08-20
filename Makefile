@@ -1,4 +1,4 @@
-.PHONY: build test lint clean config-local
+.PHONY: build test lint clean config-local service-install service-uninstall service-start service-stop service-restart service-status service-logs
 
 build:
 	go build -o bin/httphop-server ./cmd/server
@@ -25,4 +25,26 @@ config-local:
 	done
 	@echo "configs/local/ + configs/secrets/ ready. Generate secrets, e.g.:"
 	@echo "  openssl rand -hex 32 > configs/secrets/home-gpu-01.token"
+
+# macOS LaunchAgent helpers (auto-start at login, easy start/stop)
+service-install:
+	./scripts/macos/client-service.sh install
+
+service-uninstall:
+	./scripts/macos/client-service.sh uninstall
+
+service-start:
+	./scripts/macos/client-service.sh start
+
+service-stop:
+	./scripts/macos/client-service.sh stop
+
+service-restart:
+	./scripts/macos/client-service.sh restart
+
+service-status:
+	./scripts/macos/client-service.sh status
+
+service-logs:
+	./scripts/macos/client-service.sh logs
 
