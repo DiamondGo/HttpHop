@@ -1,20 +1,43 @@
 # Pair with configs/examples/local/server.yaml.example (client_id must match).
+#
+# Two formats are supported:
+#   1. Single-service (legacy): top-level client_id + local + server
+#   2. Multi-service: services list with shared transport/health defaults
+#
+# The multi-service format runs multiple tunnels in one process, each with
+# its own server, token, and local target.
 
-client_id: "home-gpu-01"
+# --- Single-service format (legacy) ---
+# client_id: "home-gpu-01"
+#
+# server:
+#   url: "http://127.0.0.1:8443"
+#   token_file: "../secrets/home-gpu-01.token"
+#   insecure_skip_verify: true
+#
+# local:
+#   target: "127.0.0.1:8080"
+#
+# transport:
+#   poll_interval: 0s
+#   poll_grace: 10s
+#
+# health:
+#   enabled: true
+#   mode: "tcp"
+#   interval: 15s
+#   timeout: 3s
+#
+# logging:
+#   level: "info"
 
-server:
-  url: "http://127.0.0.1:8443"
-  token_file: "../secrets/home-gpu-01.token"
-  insecure_skip_verify: true
-
-local:
-  target: "127.0.0.1:8080"
-  host_header_rewrite: ""
+# --- Multi-service format ---
+# Shared transport/health/logging defaults; each service sets its own server.
 
 transport:
   poll_interval: 0s
   poll_grace: 10s
-  # Pair with the server's stream/websocket options above:
+  # Pair with the server's stream/websocket options:
   # prefer_stream: true               # ask for stream-mode download polling
   # upload_stream_preference: ""      # "" = auto-probe, "stream" = force, "batch" = never
   # prefer_websocket: true            # ask to attach over a single WebSocket instead
@@ -27,3 +50,24 @@ health:
 
 logging:
   level: "info"
+
+services:
+  - client_id: "home-gpu-01"
+    token_file: "../secrets/home-gpu-01.token"
+    local:
+      target: "127.0.0.1:8080"
+    server:
+      url: "http://127.0.0.1:8443"
+      control_path: "/tunnel"
+      insecure_skip_verify: true
+
+  # - client_id: "home-blog-01"
+  #   token_file: "../secrets/home-blog-01.token"
+  #   local:
+  #     target: "127.0.0.1:3000"
+  #   server:
+  #     url: "https://blog.example.com"
+  #     control_path: "/tunnel"
+  #   health:                          # per-service health override
+  #     mode: "http"
+  #     path: "/healthz"

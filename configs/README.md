@@ -73,6 +73,32 @@ Production layout on VPS / home lab (same idea):
 token_file: "../secrets/myai.token"
 ```
 
-Server `clients[].token_file` and Client `server.token_file` for the same `client_id` must point to the **same** file content.
+Server `clients[].token_file` and Client `server.token_file` (or `services[].token_file` in multi-service format) for the same `client_id` must point to the **same** file content.
 
 Rotate: replace the `.token` file only; `client_id` and routing unchanged.
+
+## Multi-service client
+
+A single client process can tunnel multiple local services. Use a `services` list instead of top-level `client_id`/`local`/`server`:
+
+```yaml
+services:
+  - client_id: "app"
+    token_file: "../secrets/app.token"
+    local:
+      target: "127.0.0.1:8080"
+    server:
+      url: "https://app.example.com"
+      control_path: "/tunnel"
+  - client_id: "blog"
+    token_file: "../secrets/blog.token"
+    local:
+      target: "127.0.0.1:3000"
+    server:
+      url: "https://blog.example.com"
+      control_path: "/tunnel"
+```
+
+Top-level `transport`, `health`, and `logging` are shared defaults. Each service sets its own `server` and `token_file`. Per-service `health` overrides are also supported.
+
+The old single-service format (top-level `client_id` + `local` + `server`) is still supported.

@@ -42,6 +42,26 @@ func resolveClientBindingTokens(clients []ClientBinding, configPath string) erro
 	return nil
 }
 
+func resolveServiceTokens(services []ServiceEntry, configPath string) error {
+	baseDir := filepath.Dir(configPath)
+	for i := range services {
+		svc := &services[i]
+		if svc.TokenFile == "" {
+			return fmt.Errorf("service %q requires token_file", svc.ClientID)
+		}
+		path := svc.TokenFile
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(baseDir, path)
+		}
+		tok, err := readTokenFile(path)
+		if err != nil {
+			return fmt.Errorf("service %q: %w", svc.ClientID, err)
+		}
+		svc.Token = tok
+	}
+	return nil
+}
+
 func resolveClientAuthToken(cfg *ClientConfig, configPath string) error {
 	if cfg.Server.TokenFile != "" {
 		path := cfg.Server.TokenFile

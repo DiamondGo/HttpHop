@@ -29,13 +29,21 @@ func LoadServer(path string) (*ServerConfig, error) {
 	return &cfg, nil
 }
 
-func LoadClient(path string) (*ClientConfig, error) {
-	cfg := DefaultClient()
+func LoadClient(path string) ([]*ClientConfig, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+
+	if v.IsSet("services") {
+		return loadMultiClient(v, path)
+	}
+	return loadSingleClient(v, path)
+}
+
+func loadSingleClient(v *viper.Viper, path string) ([]*ClientConfig, error) {
+	cfg := DefaultClient()
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
@@ -46,7 +54,73 @@ func LoadClient(path string) (*ClientConfig, error) {
 	if err := ValidateClient(&cfg); err != nil {
 		return nil, err
 	}
-	return &cfg, nil
+	return []*ClientConfig{&cfg}, nil
+}
+
+func loadMultiClient(v *viper.Viper, path string) ([]*ClientConfig, error) {
+	var multi MultiClientConfig
+	if err := v.Unmarshal(&multi); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if len(multi.Services) == 0 {
+		return nil, fmt.Errorf("services list is empty")
+	}
+	if err := resolveServiceTokens(multi.Services, path); err != nil {
+		return nil, err
+	}
+
+	seenID := make(map[string]struct{})
+	var configs []*ClientConfig
+	for _, svc := range multi.Services {
+		if svc.ClientID == "" {
+			return nil, fmt.Errorf("client_id is required for each service entry")
+		}
+		if _, ok := seenID[svc.ClientID]; ok {
+			return nil, fmt.Errorf("duplicate client_id %q in services", svc.ClientID)
+		}
+		seenID[svc.ClientID] = struct{}{}
+
+		cfg := DefaultClient()
+		cfg.ClientID = svc.ClientID
+		cfg.Local = svc.Local
+		cfg.Transport = multi.Transport
+		cfg.Logging = multi.Logging
+
+		cfg.Server = multi.Server
+		if svc.Server != nil {
+			if svc.Server.URL != "" {
+				cfg.Server.URL = svc.Server.URL
+			}
+			if svc.Server.ControlPath != "" {
+				cfg.Server.ControlPath = svc.Server.ControlPath
+			}
+			cfg.Server.InsecureSkipVerify = svc.Server.InsecureSkipVerify
+		}
+		cfg.Server.Token = svc.Token
+
+		cfg.Health = multi.Health
+		if svc.Health != nil {
+			if svc.Health.Mode != "" {
+				cfg.Health.Mode = svc.Health.Mode
+			}
+			if svc.Health.Path != "" {
+				cfg.Health.Path = svc.Health.Path
+			}
+			if svc.Health.Interval != 0 {
+				cfg.Health.Interval = svc.Health.Interval
+			}
+			if svc.Health.Timeout != 0 {
+				cfg.Health.Timeout = svc.Health.Timeout
+			}
+		}
+
+		applyClientDefaults(&cfg)
+		if err := ValidateClient(&cfg); err != nil {
+			return nil, fmt.Errorf("service %q: %w", svc.ClientID, err)
+		}
+		configs = append(configs, &cfg)
+	}
+	return configs, nil
 }
 
 func applyServerDefaults(cfg *ServerConfig) {

@@ -70,6 +70,23 @@ type LoggingConfig struct {
 	Level string `mapstructure:"level"`
 }
 
+type ServiceEntry struct {
+	ClientID  string       `mapstructure:"client_id"`
+	TokenFile string       `mapstructure:"token_file"`
+	Token     string       `mapstructure:"-"`
+	Local     LocalConfig  `mapstructure:"local"`
+	Server    *ServerRef   `mapstructure:"server"`
+	Health    *HealthConfig `mapstructure:"health"`
+}
+
+type MultiClientConfig struct {
+	Server    ServerRef       `mapstructure:"server"`
+	Transport TransportConfig `mapstructure:"transport"`
+	Health    HealthConfig    `mapstructure:"health"`
+	Logging   LoggingConfig   `mapstructure:"logging"`
+	Services  []ServiceEntry  `mapstructure:"services"`
+}
+
 type ClientConfig struct {
 	ClientID  string          `mapstructure:"client_id"`
 	Server    ServerRef       `mapstructure:"server"`

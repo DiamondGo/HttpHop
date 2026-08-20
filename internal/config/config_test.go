@@ -87,12 +87,179 @@ local:
 	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.LoadClient(cfgPath)
+	configs, err := config.LoadClient(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server.Token != token {
-		t.Fatalf("token = %q, want %q", cfg.Server.Token, token)
+	if len(configs) != 1 {
+		t.Fatalf("expected 1 config, got %d", len(configs))
+	}
+	if configs[0].Server.Token != token {
+		t.Fatalf("token = %q, want %q", configs[0].Server.Token, token)
+	}
+}
+
+func TestLoadClientMultiService(t *testing.T) {
+	dir := t.TempDir()
+	tok1 := strings.Repeat("a", 32)
+	tok2 := strings.Repeat("b", 32)
+	if err := os.WriteFile(filepath.Join(dir, "svc1.token"), []byte(tok1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "svc2.token"), []byte(tok2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "client.yaml")
+	cfgBody := `server:
+  url: http://127.0.0.1:1
+  control_path: /tunnel
+
+health:
+  enabled: true
+  mode: tcp
+
+services:
+  - client_id: svc1
+    token_file: svc1.token
+    local:
+      target: 127.0.0.1:8080
+  - client_id: svc2
+    token_file: svc2.token
+    local:
+      target: 127.0.0.1:9090
+    health:
+      mode: http
+      path: /healthz
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configs, err := config.LoadClient(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configs) != 2 {
+		t.Fatalf("expected 2 configs, got %d", len(configs))
+	}
+	if configs[0].ClientID != "svc1" {
+		t.Fatalf("configs[0].ClientID = %q", configs[0].ClientID)
+	}
+	if configs[0].Local.Target != "127.0.0.1:8080" {
+		t.Fatalf("configs[0].Local.Target = %q", configs[0].Local.Target)
+	}
+	if configs[0].Server.Token != tok1 {
+		t.Fatalf("configs[0] token mismatch")
+	}
+	if configs[0].Health.Mode != "tcp" {
+		t.Fatalf("configs[0].Health.Mode = %q, want tcp (shared default)", configs[0].Health.Mode)
+	}
+
+	if configs[1].ClientID != "svc2" {
+		t.Fatalf("configs[1].ClientID = %q", configs[1].ClientID)
+	}
+	if configs[1].Local.Target != "127.0.0.1:9090" {
+		t.Fatalf("configs[1].Local.Target = %q", configs[1].Local.Target)
+	}
+	if configs[1].Health.Mode != "http" {
+		t.Fatalf("configs[1].Health.Mode = %q, want http (per-service override)", configs[1].Health.Mode)
+	}
+	if configs[1].Health.Path != "/healthz" {
+		t.Fatalf("configs[1].Health.Path = %q", configs[1].Health.Path)
+	}
+	if configs[1].Server.URL != "http://127.0.0.1:1" {
+		t.Fatalf("configs[1].Server.URL = %q, want shared default", configs[1].Server.URL)
+	}
+}
+
+func TestLoadClientMultiServiceDuplicateID(t *testing.T) {
+	dir := t.TempDir()
+	tok := strings.Repeat("a", 32)
+	if err := os.WriteFile(filepath.Join(dir, "tok.token"), []byte(tok), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "client.yaml")
+	cfgBody := `server:
+  url: http://127.0.0.1:1
+services:
+  - client_id: same
+    token_file: tok.token
+    local:
+      target: 127.0.0.1:8080
+  - client_id: same
+    token_file: tok.token
+    local:
+      target: 127.0.0.1:9090
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := config.LoadClient(cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "duplicate client_id") {
+		t.Fatalf("expected duplicate client_id error, got %v", err)
+	}
+}
+
+func TestLoadClientMultiServiceServerOverride(t *testing.T) {
+	dir := t.TempDir()
+	tok1 := strings.Repeat("a", 32)
+	tok2 := strings.Repeat("b", 32)
+	if err := os.WriteFile(filepath.Join(dir, "svc1.token"), []byte(tok1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "svc2.token"), []byte(tok2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "client.yaml")
+	cfgBody := `server:
+  url: http://shared.example.com
+  control_path: /shared
+  insecure_skip_verify: true
+
+services:
+  - client_id: svc1
+    token_file: svc1.token
+    local:
+      target: 127.0.0.1:8080
+  - client_id: svc2
+    token_file: svc2.token
+    local:
+      target: 127.0.0.1:9090
+    server:
+      url: http://other.example.com
+      control_path: /custom
+      insecure_skip_verify: false
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configs, err := config.LoadClient(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configs) != 2 {
+		t.Fatalf("expected 2 configs, got %d", len(configs))
+	}
+
+	// svc1: inherits shared server config
+	if configs[0].Server.URL != "http://shared.example.com" {
+		t.Fatalf("svc1 URL = %q, want shared", configs[0].Server.URL)
+	}
+	if configs[0].Server.ControlPath != "/shared" {
+		t.Fatalf("svc1 ControlPath = %q, want /shared", configs[0].Server.ControlPath)
+	}
+	if !configs[0].Server.InsecureSkipVerify {
+		t.Fatal("svc1 InsecureSkipVerify should be true (shared)")
+	}
+
+	// svc2: overrides all server fields
+	if configs[1].Server.URL != "http://other.example.com" {
+		t.Fatalf("svc2 URL = %q, want override", configs[1].Server.URL)
+	}
+	if configs[1].Server.ControlPath != "/custom" {
+		t.Fatalf("svc2 ControlPath = %q, want /custom", configs[1].Server.ControlPath)
+	}
+	if configs[1].Server.InsecureSkipVerify {
+		t.Fatal("svc2 InsecureSkipVerify should be false (per-service override)")
 	}
 }
 

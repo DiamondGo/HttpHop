@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/DiamondGo/HttpHop/internal/client"
 	"github.com/DiamondGo/HttpHop/internal/config"
@@ -17,23 +18,31 @@ func main() {
 	configPath := flag.String("config", "configs/local/client.yaml", "path to client config")
 	flag.Parse()
 
-	cfg, err := config.LoadClient(*configPath)
+	configs, err := config.LoadClient(*configPath)
 	if err != nil {
 		panic(err)
 	}
 
-	logger, err := newLogger(cfg.Logging.Level)
+	logger, err := newLogger(configs[0].Logging.Level)
 	if err != nil {
 		panic(err)
 	}
 	defer logger.Sync()
 
-	cli := client.New(cfg, logger)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := cli.Run(ctx); err != nil && err != context.Canceled {
+	g, ctx := errgroup.WithContext(ctx)
+	for _, cfg := range configs {
+		svcLogger := logger.With(zap.String("service", cfg.ClientID))
+		cli := client.New(cfg, svcLogger)
+		svcLogger.Info("starting service", zap.String("target", cfg.Local.Target))
+		g.Go(func() error {
+			return cli.Run(ctx)
+		})
+	}
+
+	if err := g.Wait(); err != nil && err != context.Canceled {
 		logger.Fatal("client exited", zap.Error(err))
 	}
 	logger.Info("client stopped")
