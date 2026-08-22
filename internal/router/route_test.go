@@ -10,7 +10,7 @@ import (
 )
 
 func TestRouteTableLongestPrefix(t *testing.T) {
-	reg := registry.NewRegistry()
+	reg := registry.NewRegistry(0)
 	bindings := []config.ClientBinding{
 		{ClientID: "a", Subdomain: "@", PathPrefix: "/service", StripPrefix: true},
 		{ClientID: "b", Subdomain: "@", PathPrefix: "/api/v1", StripPrefix: true},

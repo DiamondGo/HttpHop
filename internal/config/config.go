@@ -42,7 +42,8 @@ type TunnelConfig struct {
 	HeartbeatInterval   time.Duration `mapstructure:"heartbeat_interval"`
 	StreamMaxDuration   time.Duration `mapstructure:"stream_max_duration"`
 	EnableWebSocket     bool          `mapstructure:"enable_websocket"`
-	MaxStreamsPerTunnel int           `mapstructure:"max_streams_per_tunnel"`
+	MaxStreamsPerTunnel   int           `mapstructure:"max_streams_per_tunnel"`
+	SupersedeDrainTimeout time.Duration `mapstructure:"supersede_drain_timeout"`
 }
 
 type ProxyConfig struct {
@@ -146,7 +147,8 @@ func Defaults() ServerConfig {
 			PollMode:            pollmux.PollModeBatch,
 			HeartbeatInterval:   pollmux.DefaultHeartbeatInterval,
 			StreamMaxDuration:   pollmux.DefaultStreamMaxDuration,
-			MaxStreamsPerTunnel: 256,
+			MaxStreamsPerTunnel:   256,
+			SupersedeDrainTimeout: 10 * time.Minute,
 		},
 		Proxy: ProxyConfig{
 			ResponseHeaderTimeout: 60 * time.Second,

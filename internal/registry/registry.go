@@ -12,6 +12,8 @@ import (
 
 var ErrPoolFull = errors.New("tunnel pool full")
 
+const defaultSupersedeDrainTimeout = 10 * time.Minute
+
 type ClientTunnel struct {
 	ID          string
 	Subdomain   string
@@ -21,6 +23,8 @@ type ClientTunnel struct {
 	RemoteAddr  string
 
 	LocalHealthy  atomic.Bool
+	Draining      atomic.Bool
+	Closed        atomic.Bool
 	ActiveStreams atomic.Int64
 }
 
@@ -35,6 +39,7 @@ func (t *ClientTunnel) Alive() bool {
 }
 
 func (t *ClientTunnel) Close() error {
+	t.Closed.Store(true)
 	var err error
 	if t.Yamux != nil {
 		err = t.Yamux.Close()
@@ -46,15 +51,20 @@ func (t *ClientTunnel) Close() error {
 }
 
 type Registry struct {
-	mu     sync.RWMutex
-	byName map[string]*TunnelPool
-	bySess map[string]*ClientTunnel
+	mu                   sync.RWMutex
+	byName               map[string]*TunnelPool
+	bySess               map[string]*ClientTunnel
+	supersedeDrainTimeout time.Duration
 }
 
-func NewRegistry() *Registry {
+func NewRegistry(supersedeDrainTimeout time.Duration) *Registry {
+	if supersedeDrainTimeout <= 0 {
+		supersedeDrainTimeout = defaultSupersedeDrainTimeout
+	}
 	return &Registry{
-		byName: make(map[string]*TunnelPool),
-		bySess: make(map[string]*ClientTunnel),
+		byName:                make(map[string]*TunnelPool),
+		bySess:                make(map[string]*ClientTunnel),
+		supersedeDrainTimeout: supersedeDrainTimeout,
 	}
 }
 
@@ -83,7 +93,7 @@ func (r *Registry) Register(t *ClientTunnel, maxPerSubdomain int) error {
 		delete(r.bySess, old.Session.ID)
 	}
 
-	if err := pool.Add(t, maxPerSubdomain); err != nil {
+	if err := pool.Add(t, maxPerSubdomain, r.supersedeDrainTimeout); err != nil {
 		return err
 	}
 

@@ -16,16 +16,18 @@ import (
 )
 
 type Client struct {
-	cfg     *config.ClientConfig
-	handler *StreamHandler
-	health  *Checker
-	logger  *zap.Logger
+	cfg          *config.ClientConfig
+	handler      *StreamHandler
+	health       *Checker
+	logger       *zap.Logger
+	diagnostics  *sessionDiagnostics
 }
 
 func New(cfg *config.ClientConfig, logger *zap.Logger) *Client {
 	c := &Client{
-		cfg:    cfg,
-		logger: logger,
+		cfg:         cfg,
+		logger:      logger,
+		diagnostics: newSessionDiagnostics(),
 	}
 	c.health = NewChecker(cfg.Health, cfg.Local.Target, logger)
 	c.handler = NewStreamHandler(cfg.Local, cfg.Transport.DialTimeout, logger)
@@ -51,12 +53,20 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 func (c *Client) serveSession(ctx context.Context, conn pollmux.Conn) pollmux.Outcome {
+	start := time.Now()
+	sessionID := conn.SessionID()
+
 	sess, err := pollmux.ServerSession(conn)
 	if err != nil {
-		return pollmux.OutcomeTransportFailed
+		outcome := pollmux.OutcomeTransportFailed
+		c.diagnostics.record(c.logger, c.cfg.ClientID, sessionID, time.Since(start), outcome, err.Error())
+		return outcome
 	}
 	defer sess.Close()
-	return pollmux.AcceptLoop(ctx, sess, conn, c.handler.Handle)
+
+	outcome := pollmux.AcceptLoop(ctx, sess, conn, c.handler.Handle)
+	c.diagnostics.record(c.logger, c.cfg.ClientID, sessionID, time.Since(start), outcome, "")
+	return outcome
 }
 
 func (c *Client) buildConnector(logger *slog.Logger) *pollmux.Connector {

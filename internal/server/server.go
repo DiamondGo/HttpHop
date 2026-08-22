@@ -50,7 +50,7 @@ func NewServer(cfg *config.ServerConfig, logger *zap.Logger) (*Server, error) {
 		return nil, err
 	}
 
-	reg := registry.NewRegistry()
+	reg := registry.NewRegistry(cfg.Tunnel.SupersedeDrainTimeout)
 	routes, err := buildRouteTable(cfg, reg)
 	if err != nil {
 		return nil, err
@@ -150,6 +150,18 @@ func (s *Server) onConnect(session *pollmux.Session, meta map[string]string) err
 		Yamux:       yamuxSess,
 		ConnectedAt: time.Now(),
 		RemoteAddr:  remoteAddrFromSession(session),
+	}
+
+	if prev, ok := s.registry.Pool(binding.Subdomain); ok {
+		if old := prev.ByID(clientID); old != nil && old.Session != nil {
+			streams := old.ActiveStreams.Load()
+			if streams > 0 {
+				s.logger.Info("superseding tunnel, draining in-flight streams",
+					zap.String("client_id", clientID),
+					zap.String("old_session_id", old.Session.ID),
+					zap.Int64("active_streams", streams))
+			}
+		}
 	}
 
 	if err := s.registry.Register(tun, binding.MaxClients); err != nil {

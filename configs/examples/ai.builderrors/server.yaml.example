@@ -28,6 +28,7 @@ tunnel:
   session_timeout: 60s
   sweep_interval: 5s
   max_streams_per_tunnel: 256
+  supersede_drain_timeout: 10m
   # Stream mode / WebSocket transport (pollmux >= v0.1.0): left off here on
   # purpose. This deployment sits behind Cloudflare, and Cloudflare's
   # non-Enterprise tiers buffer a long-held HTTP request/response body

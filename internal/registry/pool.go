@@ -3,6 +3,7 @@ package registry
 import (
 	"net/http"
 	"sync"
+	"time"
 )
 
 type TunnelPool struct {
@@ -19,14 +20,14 @@ type firstAvailable struct{}
 
 func (firstAvailable) Pick(members []*ClientTunnel, _ *http.Request) *ClientTunnel {
 	for _, m := range members {
-		if m.Alive() && m.LocalHealthy.Load() {
+		if m.Alive() && m.LocalHealthy.Load() && !m.Draining.Load() {
 			return m
 		}
 	}
 	return nil
 }
 
-func (p *TunnelPool) Add(t *ClientTunnel, max int) error {
+func (p *TunnelPool) Add(t *ClientTunnel, max int, drainTimeout time.Duration) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -34,7 +35,7 @@ func (p *TunnelPool) Add(t *ClientTunnel, max int) error {
 		if m.ID == t.ID {
 			old := p.members[i]
 			p.members[i] = t
-			go old.Close()
+			beginSupersedeDrain(old, drainTimeout)
 			return nil
 		}
 	}
@@ -44,6 +45,25 @@ func (p *TunnelPool) Add(t *ClientTunnel, max int) error {
 	}
 	p.members = append(p.members, t)
 	return nil
+}
+
+// beginSupersedeDrain keeps a replaced tunnel alive until in-flight streams
+// finish or drainTimeout elapses. New requests route to the replacement.
+func beginSupersedeDrain(old *ClientTunnel, drainTimeout time.Duration) {
+	if drainTimeout <= 0 {
+		drainTimeout = defaultSupersedeDrainTimeout
+	}
+	old.Draining.Store(true)
+	go func() {
+		deadline := time.Now().Add(drainTimeout)
+		for time.Now().Before(deadline) {
+			if old.ActiveStreams.Load() == 0 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		_ = old.Close()
+	}()
 }
 
 func (p *TunnelPool) Remove(id string) {

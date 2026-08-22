@@ -15,6 +15,7 @@ tunnel:
   poll_timeout: 30s
   session_timeout: 60s
   max_streams_per_tunnel: 256
+  supersede_drain_timeout: 10m
 
 proxy:
   response_header_timeout: 60s
