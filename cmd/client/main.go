@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/DiamondGo/HttpHop/internal/client"
 	"github.com/DiamondGo/HttpHop/internal/config"
@@ -16,6 +17,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "configs/local/client.yaml", "path to client config")
+	allowDuplicate := flag.Bool("allow-duplicate", false, "allow starting when another httphop-client is already running")
 	flag.Parse()
 
 	configs, err := config.LoadClient(*configPath)
@@ -29,23 +31,51 @@ func main() {
 	}
 	defer logger.Sync()
 
+	releaseLock, err := client.AcquireProcessLock(*allowDuplicate)
+	if err != nil {
+		panic(err)
+	}
+	defer releaseLock()
+
+	logger.Info("httphop-client starting",
+		zap.Int("pid", os.Getpid()),
+		zap.String("config", *configPath),
+		zap.Int("services", len(configs)),
+	)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	g, ctx := errgroup.WithContext(ctx)
+	go func() {
+		<-ctx.Done()
+		reason := "signal"
+		if err := context.Cause(ctx); err != nil {
+			reason = err.Error()
+		}
+		logger.Info("client shutdown requested",
+			zap.Int("pid", os.Getpid()),
+			zap.String("reason", reason),
+		)
+	}()
+
+	var wg sync.WaitGroup
 	for _, cfg := range configs {
 		svcLogger := logger.With(zap.String("service", cfg.ClientID))
 		cli := client.New(cfg, svcLogger)
 		svcLogger.Info("starting service", zap.String("target", cfg.Local.Target))
-		g.Go(func() error {
-			return cli.Run(ctx)
-		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := cli.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				svcLogger.Error("service exited with error", zap.Error(err))
+			} else if err == nil {
+				svcLogger.Warn("service stopped unexpectedly (superseded?)")
+			}
+		}()
 	}
 
-	if err := g.Wait(); err != nil && err != context.Canceled {
-		logger.Fatal("client exited", zap.Error(err))
-	}
-	logger.Info("client stopped")
+	wg.Wait()
+	logger.Info("client stopped", zap.Int("pid", os.Getpid()))
 }
 
 func newLogger(level string) (*zap.Logger, error) {

@@ -65,7 +65,8 @@ func (c *Client) serveSession(ctx context.Context, conn pollmux.Conn) pollmux.Ou
 	defer sess.Close()
 
 	outcome := pollmux.AcceptLoop(ctx, sess, conn, c.handler.Handle)
-	c.diagnostics.record(c.logger, c.cfg.ClientID, sessionID, time.Since(start), outcome, "")
+	detail := sessionEndDetail(ctx, conn, outcome)
+	c.diagnostics.record(c.logger, c.cfg.ClientID, sessionID, time.Since(start), outcome, detail)
 	return outcome
 }
 

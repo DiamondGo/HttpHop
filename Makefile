@@ -1,4 +1,4 @@
-.PHONY: build test lint clean config-local service-install service-uninstall service-start service-stop service-restart service-status service-logs
+.PHONY: build test lint clean config-local service-install service-uninstall service-start service-stop service-restart service-status service-logs service-preflight
 
 build:
 	go build -o bin/httphop-server ./cmd/server
@@ -47,4 +47,7 @@ service-status:
 
 service-logs:
 	./scripts/macos/client-service.sh logs
+
+service-preflight:
+	./scripts/macos/client-service.sh preflight
 

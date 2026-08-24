@@ -27,6 +27,7 @@ Commands:
   stop       Stop the client (unload + disable until next start)
   restart    stop then start
   status     Show whether the service is loaded and running
+  preflight  Audit local client setup (duplicate process, stale binary, cron)
   logs       Tail client stdout/stderr logs
 
 Environment overrides:
@@ -51,6 +52,27 @@ require_config() {
 	if [[ ! -f "$CONFIG" ]]; then
 		echo "error: config not found: $CONFIG" >&2
 		exit 1
+	fi
+}
+
+ensure_single_client() {
+	local pids count
+	pids=$(pgrep -f "httphop-client" 2>/dev/null || true)
+	if [[ -z "$pids" ]]; then
+		return 0
+	fi
+	count=$(echo "$pids" | wc -l | tr -d ' ')
+	if [[ "$count" -gt 0 && "${HTTPHOP_FORCE_START:-}" != "1" ]]; then
+		echo "error: httphop-client already running (PIDs: $(echo "$pids" | tr '\n' ' '))" >&2
+		echo "Run '$0 stop' first, or HTTPHOP_FORCE_START=1 $0 start to override." >&2
+		exit 1
+	fi
+}
+
+warn_stale_binary() {
+	if [[ -x "$REPO_ROOT/client" ]]; then
+		echo "warning: stale binary $REPO_ROOT/client exists — use bin/httphop-client only" >&2
+		echo "  remove it: rm -f $REPO_ROOT/client" >&2
 	fi
 }
 
@@ -93,6 +115,7 @@ is_loaded() {
 cmd_install() {
 	require_binary
 	require_config
+	warn_stale_binary
 	write_plist
 	launchctl enable "$SERVICE" >/dev/null 2>&1 || true
 	if is_loaded; then
@@ -118,6 +141,7 @@ cmd_uninstall() {
 cmd_start() {
 	require_binary
 	require_config
+	warn_stale_binary
 	if [[ ! -f "$PLIST" ]]; then
 		write_plist
 	fi
@@ -126,6 +150,7 @@ cmd_start() {
 		echo "Already running: $LABEL"
 		return 0
 	fi
+	ensure_single_client
 	launchctl bootstrap "$DOMAIN" "$PLIST"
 	echo "Started: $LABEL"
 }
@@ -168,6 +193,10 @@ cmd_logs() {
 	tail -f "$STDOUT_LOG" "$STDERR_LOG"
 }
 
+cmd_preflight() {
+	"$SCRIPT_DIR/client-preflight.sh"
+}
+
 main() {
 	local cmd="${1:-}"
 	case "$cmd" in
@@ -177,6 +206,7 @@ main() {
 	stop) cmd_stop ;;
 	restart) cmd_restart ;;
 	status) cmd_status ;;
+	preflight) cmd_preflight ;;
 	logs) cmd_logs ;;
 	-h | --help | help | "") usage ;;
 	*)
