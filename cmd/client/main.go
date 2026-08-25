@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -61,15 +62,29 @@ func main() {
 	var wg sync.WaitGroup
 	for _, cfg := range configs {
 		svcLogger := logger.With(zap.String("service", cfg.ClientID))
-		cli := client.New(cfg, svcLogger)
 		svcLogger.Info("starting service", zap.String("target", cfg.Local.Target))
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := cli.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				svcLogger.Error("service exited with error", zap.Error(err))
-			} else if err == nil {
-				svcLogger.Warn("service stopped unexpectedly (superseded?)")
+			for {
+				cli := client.New(cfg, svcLogger)
+				err := cli.Run(ctx)
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
+					svcLogger.Error("service exited with error", zap.Error(err))
+					return
+				}
+				// Run returned nil → superseded. Restart the service
+				// so a transient supersession doesn't kill the tunnel
+				// permanently.
+				svcLogger.Warn("service superseded, restarting")
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Second):
+				}
 			}
 		}()
 	}
