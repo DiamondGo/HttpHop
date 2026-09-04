@@ -120,6 +120,125 @@ func TestControlConnectPollDelete(t *testing.T) {
 	}
 }
 
+func TestControlResumeNegotiationAndEndpoint(t *testing.T) {
+	const clientID = "resume-client"
+	cfg := testServerConfig(clientID)
+	cfg.Tunnel.EnableWebSocket = true
+	cfg.Tunnel.EnableResume = true
+	cfg.Tunnel.ResumeGrace = 2 * time.Second
+	_, baseURL := startTestServer(t, cfg)
+
+	body, _ := json.Marshal(pollmux.ConnectRequest{
+		ProtocolVersion: pollmux.ProtocolVersion,
+		Meta:            map[string]string{"client_id": clientID},
+		PreferWebSocket: true,
+		PreferResume:    true,
+	})
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/connect", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testClientToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var cr pollmux.ConnectResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Resumable {
+		t.Fatal("server did not negotiate resumable WebSocket transport")
+	}
+	if cr.Limits.ResumeGrace() != 2*time.Second {
+		t.Fatalf("resume grace = %v, want 2s", cr.Limits.ResumeGrace())
+	}
+
+	resumeBody, _ := json.Marshal(pollmux.ResumeRequest{ProtocolVersion: pollmux.ProtocolVersion})
+	resumeReq, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/"+cr.SessionID+"/resume", bytes.NewReader(resumeBody))
+	resumeReq.Header.Set("Authorization", "Bearer "+testClientToken)
+	resumeReq.Header.Set("Content-Type", "application/json")
+	resumeResp, err := http.DefaultClient.Do(resumeReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumeResp.Body.Close()
+	if resumeResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resumeResp.Body)
+		t.Fatalf("resume status %d: %s", resumeResp.StatusCode, b)
+	}
+	var rr pollmux.ResumeResponse
+	if err := json.NewDecoder(resumeResp.Body).Decode(&rr); err != nil {
+		t.Fatal(err)
+	}
+	if !rr.Resumed {
+		t.Fatal("resume endpoint did not report success")
+	}
+}
+
+func TestControlResumeRejectsWrongToken(t *testing.T) {
+	const clientID = "resume-auth-client"
+	cfg := testServerConfig(clientID)
+	cfg.Tunnel.EnableWebSocket = true
+	_, baseURL := startTestServer(t, cfg)
+
+	body, _ := json.Marshal(pollmux.ConnectRequest{
+		ProtocolVersion: pollmux.ProtocolVersion,
+		Meta:            map[string]string{"client_id": clientID},
+		PreferWebSocket: true,
+		PreferResume:    true,
+	})
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/connect", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testClientToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cr pollmux.ConnectResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	resumeBody, _ := json.Marshal(pollmux.ResumeRequest{ProtocolVersion: pollmux.ProtocolVersion})
+	resumeReq, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/"+cr.SessionID+"/resume", bytes.NewReader(resumeBody))
+	resumeReq.Header.Set("Authorization", "Bearer wrong")
+	resumeResp, err := http.DefaultClient.Do(resumeReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeResp.Body.Close()
+	if resumeResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("resume status = %d, want 401", resumeResp.StatusCode)
+	}
+}
+
+func TestControlResumeNotNegotiatedForBatch(t *testing.T) {
+	const clientID = "batch-client"
+	cfg := testServerConfig(clientID)
+	cfg.Tunnel.EnableResume = true
+	_, baseURL := startTestServer(t, cfg)
+
+	body, _ := json.Marshal(pollmux.ConnectRequest{
+		ProtocolVersion: pollmux.ProtocolVersion,
+		Meta:            map[string]string{"client_id": clientID},
+		PreferResume:    true,
+	})
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/tunnel/connect", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testClientToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var cr pollmux.ConnectResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	if cr.Resumable {
+		t.Fatal("batch transport must not negotiate resume")
+	}
+}
+
 func TestControlInvalidToken(t *testing.T) {
 	cfg := testServerConfig("test-client")
 	_, baseURL := startTestServer(t, cfg)

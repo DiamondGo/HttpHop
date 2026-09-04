@@ -18,9 +18,13 @@ local:
 transport:
   poll_interval: 0s
   poll_grace: 10s
-  # See server.yaml.example's note on Cloudflare + stream mode. If the server
-  # enables enable_websocket, opt in here rather than prefer_stream:
-  # prefer_websocket: true
+  # See server.yaml.example's note on Cloudflare: prefer WebSocket rather
+  # than HTTP stream mode on this path.
+  prefer_websocket: true
+  # Resume is enabled by default, but keeping it explicit documents that
+  # active requests should survive short WebSocket interruptions.
+  prefer_resume: true
+  max_replay_bytes: 16777216
 
 health:
   enabled: true

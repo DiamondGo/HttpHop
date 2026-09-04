@@ -6,7 +6,7 @@ HttpHop runs a **Server** on a machine with a public IP and domain, and a **Clie
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and [plans/IMPLEMENTATION.md](plans/IMPLEMENTATION.md) for the build plan.
 
-Example configs: [configs/README.md](configs/README.md) — copy from `configs/examples/` to `configs/local/`.
+Example configs: [configs/README.md](configs/README.md) — copy from `configs/examples/` to `configs/local/`. Existing installations should follow its **Upgrade existing configs: resumable tunnels** section.
 
 ## How it works
 
@@ -24,6 +24,7 @@ Example configs: [configs/README.md](configs/README.md) — copy from `configs/e
 - The **Server** sits on a machine with a public IP and your domain. It terminates HTTPS for users and maintains tunnels from Clients.
 - The **Client** runs where your service lives. It **initiates** outbound connections to the Server — no port forwarding on the internal network.
 - One Client instance exposes **one** local `target` (e.g. `127.0.0.1:8080`). Run multiple Clients for multiple services.
+- With WebSocket (or two-way stream) transport, pollmux v0.2 session resume preserves the yamux session and active HTTP requests across short transport interruptions.
 
 ---
 
@@ -102,7 +103,7 @@ On the VPS (tunnel registered):
 
 ```bash
 curl -s http://127.0.0.1:9090/status | jq .
-# → "subdomain": "myapp", "local_health": "ok"
+# → "subdomain": "myapp", "local_health": "ok", "resumable": true
 ```
 
 From anywhere:

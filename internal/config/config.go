@@ -31,17 +31,21 @@ type TLSConfig struct {
 }
 
 type TunnelConfig struct {
-	PollTimeout         time.Duration `mapstructure:"poll_timeout"`
-	SessionTimeout      time.Duration `mapstructure:"session_timeout"`
-	SweepInterval       time.Duration `mapstructure:"sweep_interval"`
-	CoalesceWindow      time.Duration `mapstructure:"coalesce_window"`
-	PollBufferSize      int           `mapstructure:"poll_buffer_size"`
-	MaxSendBytes        int           `mapstructure:"max_send_bytes"`
-	HighWaterWarn       int           `mapstructure:"high_water_warn"`
-	PollMode            string        `mapstructure:"poll_mode"`
-	HeartbeatInterval   time.Duration `mapstructure:"heartbeat_interval"`
-	StreamMaxDuration   time.Duration `mapstructure:"stream_max_duration"`
-	EnableWebSocket     bool          `mapstructure:"enable_websocket"`
+	PollTimeout           time.Duration `mapstructure:"poll_timeout"`
+	SessionTimeout        time.Duration `mapstructure:"session_timeout"`
+	SweepInterval         time.Duration `mapstructure:"sweep_interval"`
+	CoalesceWindow        time.Duration `mapstructure:"coalesce_window"`
+	PollBufferSize        int           `mapstructure:"poll_buffer_size"`
+	MaxSendBytes          int           `mapstructure:"max_send_bytes"`
+	HighWaterWarn         int           `mapstructure:"high_water_warn"`
+	PollMode              string        `mapstructure:"poll_mode"`
+	HeartbeatInterval     time.Duration `mapstructure:"heartbeat_interval"`
+	StreamMaxDuration     time.Duration `mapstructure:"stream_max_duration"`
+	EnableWebSocket       bool          `mapstructure:"enable_websocket"`
+	EnableResume          bool          `mapstructure:"enable_resume"`
+	ResumeGrace           time.Duration `mapstructure:"resume_grace"`
+	MaxReplayBytes        int           `mapstructure:"max_replay_bytes"`
+	MaxDetachedResumable  int           `mapstructure:"max_detached_resumable"`
 	MaxStreamsPerTunnel   int           `mapstructure:"max_streams_per_tunnel"`
 	SupersedeDrainTimeout time.Duration `mapstructure:"supersede_drain_timeout"`
 }
@@ -121,6 +125,8 @@ type TransportConfig struct {
 	UploadStreamPreference string        `mapstructure:"upload_stream_preference"`
 	UploadProbeTimeout     time.Duration `mapstructure:"upload_probe_timeout"`
 	PreferWebSocket        bool          `mapstructure:"prefer_websocket"`
+	PreferResume           bool          `mapstructure:"prefer_resume"`
+	MaxReplayBytes         int           `mapstructure:"max_replay_bytes"`
 }
 
 type HealthConfig struct {
@@ -138,15 +144,19 @@ func Defaults() ServerConfig {
 		ControlPath:  "/tunnel",
 		DevListen:    ":8443",
 		Tunnel: TunnelConfig{
-			PollTimeout:         30 * time.Second,
-			SessionTimeout:      60 * time.Second,
-			SweepInterval:       5 * time.Second,
-			CoalesceWindow:      2 * time.Millisecond,
-			PollBufferSize:      256 << 10,
-			MaxSendBytes:        1 << 20,
-			PollMode:            pollmux.PollModeBatch,
-			HeartbeatInterval:   pollmux.DefaultHeartbeatInterval,
-			StreamMaxDuration:   pollmux.DefaultStreamMaxDuration,
+			PollTimeout:           30 * time.Second,
+			SessionTimeout:        60 * time.Second,
+			SweepInterval:         5 * time.Second,
+			CoalesceWindow:        2 * time.Millisecond,
+			PollBufferSize:        256 << 10,
+			MaxSendBytes:          1 << 20,
+			PollMode:              pollmux.PollModeBatch,
+			HeartbeatInterval:     pollmux.DefaultHeartbeatInterval,
+			StreamMaxDuration:     pollmux.DefaultStreamMaxDuration,
+			EnableResume:          true,
+			ResumeGrace:           pollmux.DefaultResumeGrace,
+			MaxReplayBytes:        pollmux.DefaultMaxReplayBytes,
+			MaxDetachedResumable:  pollmux.DefaultMaxDetachedResumable,
 			MaxStreamsPerTunnel:   256,
 			SupersedeDrainTimeout: 10 * time.Minute,
 		},
@@ -171,6 +181,8 @@ func DefaultClient() ClientConfig {
 			DialTimeout:    10 * time.Second,
 			CoalesceWindow: 2 * time.Millisecond,
 			MaxSendChunk:   512 << 10,
+			PreferResume:   true,
+			MaxReplayBytes: pollmux.DefaultMaxReplayBytes,
 			// PreferStream/UploadStreamPreference/PreferWebSocket default to
 			// off ("", false): an old-server/new-client pair negotiates down
 			// to plain batch polling with no behavior change. Opt in per
@@ -196,17 +208,21 @@ func (cfg ServerConfig) PollmuxServerConfig(logger *slog.Logger) pollmux.ServerC
 		pollMode = pollmux.PollModeBatch
 	}
 	return pollmux.ServerConfig{
-		PollTimeout:       cfg.Tunnel.PollTimeout,
-		SessionTimeout:    cfg.Tunnel.SessionTimeout,
-		SweepInterval:     cfg.Tunnel.SweepInterval,
-		CoalesceWindow:    cfg.Tunnel.CoalesceWindow,
-		PollBufferSize:    cfg.Tunnel.PollBufferSize,
-		MaxSendBytes:      cfg.Tunnel.MaxSendBytes,
-		HighWaterWarn:     cfg.Tunnel.HighWaterWarn,
-		PollMode:          pollMode,
-		HeartbeatInterval: cfg.Tunnel.HeartbeatInterval,
-		StreamMaxDuration: cfg.Tunnel.StreamMaxDuration,
-		EnableWebSocket:   cfg.Tunnel.EnableWebSocket,
-		Logger:            logger,
+		PollTimeout:          cfg.Tunnel.PollTimeout,
+		SessionTimeout:       cfg.Tunnel.SessionTimeout,
+		SweepInterval:        cfg.Tunnel.SweepInterval,
+		CoalesceWindow:       cfg.Tunnel.CoalesceWindow,
+		PollBufferSize:       cfg.Tunnel.PollBufferSize,
+		MaxSendBytes:         cfg.Tunnel.MaxSendBytes,
+		HighWaterWarn:        cfg.Tunnel.HighWaterWarn,
+		PollMode:             pollMode,
+		HeartbeatInterval:    cfg.Tunnel.HeartbeatInterval,
+		StreamMaxDuration:    cfg.Tunnel.StreamMaxDuration,
+		EnableWebSocket:      cfg.Tunnel.EnableWebSocket,
+		EnableResume:         cfg.Tunnel.EnableResume,
+		ResumeGrace:          cfg.Tunnel.ResumeGrace,
+		MaxReplayBytes:       cfg.Tunnel.MaxReplayBytes,
+		MaxDetachedResumable: cfg.Tunnel.MaxDetachedResumable,
+		Logger:               logger,
 	}
 }

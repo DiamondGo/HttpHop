@@ -15,6 +15,9 @@ local:
 transport:
   poll_interval: 0s
   poll_grace: 10s
+  prefer_websocket: true
+  prefer_resume: true
+  max_replay_bytes: 16777216
 
 health:
   enabled: true

@@ -37,6 +37,8 @@
 transport:
   poll_interval: 0s
   poll_grace: 10s
+  prefer_resume: true              # default; effective only with WebSocket or two-way stream
+  max_replay_bytes: 16777216       # per direction; must fit your memory budget
   # Pair with the server's stream/websocket options:
   # prefer_stream: true               # ask for stream-mode download polling
   # upload_stream_preference: ""      # "" = auto-probe, "stream" = force, "batch" = never

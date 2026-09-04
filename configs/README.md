@@ -102,3 +102,50 @@ services:
 Top-level `transport`, `health`, and `logging` are shared defaults. Each service sets its own `server` and `token_file`. Per-service `health` overrides are also supported.
 
 The old single-service format (top-level `client_id` + `local` + `server`) is still supported.
+
+## Upgrade existing configs: resumable tunnels
+
+HttpHop now enables pollmux session resume by default. Resume keeps the same
+pollmux/yamux session—and therefore active HTTP requests—alive across a short
+transport disconnect. It is negotiated only when the tunnel uses WebSocket or
+stream mode in **both** directions; batch polling remains compatible but is not
+resumable.
+
+Recommended server settings (especially behind Cloudflare/nginx):
+
+```yaml
+tunnel:
+  enable_websocket: true
+  enable_resume: true
+  resume_grace: 30s
+  max_replay_bytes: 16777216       # 16 MiB per direction per tunnel
+  max_detached_resumable: 1024     # lower this on small servers
+```
+
+Recommended client settings:
+
+```yaml
+transport:
+  prefer_websocket: true
+  prefer_resume: true
+  max_replay_bytes: 16777216
+```
+
+Restart both server and client after editing. Rolling upgrades are safe because
+resume negotiation is additive: upgrade the server first, then clients. A new
+binary with an old config uses the resume defaults, but resume becomes effective
+only after WebSocket or two-way stream is enabled. To retain the old behavior,
+set `enable_resume: false` on the server or `prefer_resume: false` on clients.
+
+Memory planning: `max_replay_bytes` is a per-direction ceiling on each side, not
+a global pool. Detached resumable sessions also remain allocated for
+`resume_grace`, bounded server-side by `max_detached_resumable`. Use smaller
+values where many tunnels share a memory-constrained host. Keep proxy
+`response_header_timeout` longer than `resume_grace` if requests should wait for
+recovery. The status endpoint reports `resumable: true` for a successfully
+negotiated tunnel and includes `resume_deadline` while its transport is detached.
+
+When nginx fronts HttpHop, `/tunnel/{id}/resume` must be routed through the same
+location and authorization boundary as `/connect`, `/poll`, `/ws`, and DELETE.
+For WebSocket, retain HTTP/1.1 plus the `Upgrade` and `Connection` headers shown
+in the production example.

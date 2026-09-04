@@ -460,6 +460,114 @@ func TestEnableWebSocketMapping(t *testing.T) {
 	}
 }
 
+func TestResumeDefaultsAndMapping(t *testing.T) {
+	cfg := config.Defaults()
+	if !cfg.Tunnel.EnableResume {
+		t.Fatal("server resume should be enabled by default")
+	}
+	pcfg := cfg.PollmuxServerConfig(nil)
+	if !pcfg.EnableResume {
+		t.Fatal("expected EnableResume to carry through to pollmux.ServerConfig")
+	}
+	if pcfg.ResumeGrace != pollmux.DefaultResumeGrace || pcfg.MaxReplayBytes != pollmux.DefaultMaxReplayBytes ||
+		pcfg.MaxDetachedResumable != pollmux.DefaultMaxDetachedResumable {
+		t.Fatalf("unexpected resume mapping: grace=%v replay=%d detached=%d", pcfg.ResumeGrace, pcfg.MaxReplayBytes, pcfg.MaxDetachedResumable)
+	}
+
+	clientCfg := config.DefaultClient()
+	if !clientCfg.Transport.PreferResume || clientCfg.Transport.MaxReplayBytes != pollmux.DefaultMaxReplayBytes {
+		t.Fatalf("unexpected client resume defaults: prefer=%v replay=%d", clientCfg.Transport.PreferResume, clientCfg.Transport.MaxReplayBytes)
+	}
+}
+
+func TestLoadClientResumeDefaultsAndOptOut(t *testing.T) {
+	dir := t.TempDir()
+	token := strings.Repeat("r", 32)
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := `client_id: dev-1
+server:
+  url: http://127.0.0.1:1
+  token_file: token
+local:
+  target: 127.0.0.1:8080
+`
+	path := filepath.Join(dir, "client.yaml")
+	if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded[0].Transport.PreferResume {
+		t.Fatal("omitted prefer_resume should default to true")
+	}
+
+	if err := os.WriteFile(path, []byte(base+"transport:\n  prefer_resume: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = config.LoadClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded[0].Transport.PreferResume {
+		t.Fatal("explicit prefer_resume: false was not honored")
+	}
+}
+
+func TestLoadMultiClientResumeDefaults(t *testing.T) {
+	dir := t.TempDir()
+	token := strings.Repeat("m", 32)
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "client.yaml")
+	body := `transport:
+  poll_grace: 10s
+services:
+  - client_id: dev-1
+    token_file: token
+    local:
+      target: 127.0.0.1:8080
+    server:
+      url: http://127.0.0.1:1
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded[0].Transport.PreferResume || loaded[0].Transport.MaxReplayBytes != pollmux.DefaultMaxReplayBytes {
+		t.Fatalf("unexpected multi-service resume defaults: prefer=%v replay=%d", loaded[0].Transport.PreferResume, loaded[0].Transport.MaxReplayBytes)
+	}
+}
+
+func TestResumeValidation(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.RootDomain = "example.com"
+	cfg.Clients = []config.ClientBinding{{
+		ClientID: "app-1", Subdomain: "app", Token: strings.Repeat("a", 32), MaxClients: 1,
+	}}
+	cfg.Tunnel.ResumeGrace = pollmux.MaxResumeGrace + time.Second
+	if err := config.ValidateServer(&cfg); err == nil || !strings.Contains(err.Error(), "resume_grace") {
+		t.Fatalf("expected resume_grace error, got %v", err)
+	}
+
+	cfg = config.Defaults()
+	cfg.RootDomain = "example.com"
+	cfg.Clients = []config.ClientBinding{{
+		ClientID: "app-1", Subdomain: "app", Token: strings.Repeat("a", 32), MaxClients: 1,
+	}}
+	cfg.Tunnel.MaxReplayBytes = -1
+	if err := config.ValidateServer(&cfg); err == nil || !strings.Contains(err.Error(), "max_replay_bytes") {
+		t.Fatalf("expected max_replay_bytes error, got %v", err)
+	}
+}
+
 func TestUploadStreamPreferenceValidation(t *testing.T) {
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "secret.token")

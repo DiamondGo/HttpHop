@@ -51,9 +51,9 @@ func (t *ClientTunnel) Close() error {
 }
 
 type Registry struct {
-	mu                   sync.RWMutex
-	byName               map[string]*TunnelPool
-	bySess               map[string]*ClientTunnel
+	mu                    sync.RWMutex
+	byName                map[string]*TunnelPool
+	bySess                map[string]*ClientTunnel
 	supersedeDrainTimeout time.Duration
 }
 
@@ -159,16 +159,18 @@ type TunnelStatus struct {
 }
 
 type ClientStatus struct {
-	ClientID           string    `json:"client_id"`
-	SessionID          string    `json:"session_id"`
-	RemoteAddr         string    `json:"remote_addr"`
-	ConnectedAt        time.Time `json:"connected_at"`
-	LastPollAt         time.Time `json:"last_poll_at"`
-	PollInFlight       int32     `json:"poll_in_flight"`
-	ActiveStreams      int64     `json:"active_streams"`
-	LocalHealth        string    `json:"local_health"`
-	BufferedToServer   int       `json:"buffered_to_server"`
-	BufferedFromServer int       `json:"buffered_from_server"`
+	ClientID           string     `json:"client_id"`
+	SessionID          string     `json:"session_id"`
+	RemoteAddr         string     `json:"remote_addr"`
+	ConnectedAt        time.Time  `json:"connected_at"`
+	LastPollAt         time.Time  `json:"last_poll_at"`
+	PollInFlight       int32      `json:"poll_in_flight"`
+	ActiveStreams      int64      `json:"active_streams"`
+	LocalHealth        string     `json:"local_health"`
+	BufferedToServer   int        `json:"buffered_to_server"`
+	BufferedFromServer int        `json:"buffered_from_server"`
+	Resumable          bool       `json:"resumable"`
+	ResumeDeadline     *time.Time `json:"resume_deadline,omitempty"`
 }
 
 func (r *Registry) Snapshot() []TunnelStatus {
@@ -184,12 +186,18 @@ func (r *Registry) Snapshot() []TunnelStatus {
 				health = "ok"
 			}
 			var lastPoll time.Time
+			var resumeDeadline *time.Time
 			var pollInFlight int32
 			var bufToServer, bufFromServer int
+			var resumable bool
 			if t.Session != nil {
 				lastPoll = t.Session.LastActive()
 				pollInFlight = t.Session.PollInFlight()
 				bufToServer, bufFromServer = t.Session.HiWater()
+				resumable = t.Session.Resumable()
+				if deadline, ok := t.Session.ResumeDeadline(); ok {
+					resumeDeadline = &deadline
+				}
 			}
 			ts.Clients = append(ts.Clients, ClientStatus{
 				ClientID:           t.ID,
@@ -202,6 +210,8 @@ func (r *Registry) Snapshot() []TunnelStatus {
 				LocalHealth:        health,
 				BufferedToServer:   bufToServer,
 				BufferedFromServer: bufFromServer,
+				Resumable:          resumable,
+				ResumeDeadline:     resumeDeadline,
 			})
 		}
 		out = append(out, ts)
