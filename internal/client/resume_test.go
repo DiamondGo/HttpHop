@@ -22,5 +22,4 @@ func TestBuildConnectorMapsResumeSettings(t *testing.T) {
 	if connector.MaxReplayBytes != 7<<20 {
 		t.Fatalf("MaxReplayBytes = %d, want %d", connector.MaxReplayBytes, 7<<20)
 	}
-
 }

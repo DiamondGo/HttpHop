@@ -175,7 +175,7 @@ func TestControlResumeNegotiationAndEndpoint(t *testing.T) {
 	}
 }
 
-func TestControlResumeRejectsWrongToken(t *testing.T) {
+func TestControlResumeConcealsSessionForWrongToken(t *testing.T) {
 	const clientID = "resume-auth-client"
 	cfg := testServerConfig(clientID)
 	cfg.Tunnel.EnableWebSocket = true
@@ -207,8 +207,8 @@ func TestControlResumeRejectsWrongToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	resumeResp.Body.Close()
-	if resumeResp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("resume status = %d, want 401", resumeResp.StatusCode)
+	if resumeResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("resume status = %d, want 404", resumeResp.StatusCode)
 	}
 }
 

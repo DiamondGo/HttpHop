@@ -12,6 +12,10 @@ import (
 func LoadServer(path string) (*ServerConfig, error) {
 	cfg := Defaults()
 	v := viper.New()
+	// Viper defaults preserve explicit false/zero values while supplying defaults
+	// when these resumable-session options are omitted from YAML.
+	v.SetDefault("tunnel.enable_resume", true)
+	v.SetDefault("tunnel.max_detached_resumable", pollmux.DefaultMaxDetachedResumable)
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -171,9 +175,6 @@ func applyServerDefaults(cfg *ServerConfig) {
 	}
 	if cfg.Tunnel.MaxReplayBytes == 0 {
 		cfg.Tunnel.MaxReplayBytes = d.Tunnel.MaxReplayBytes
-	}
-	if cfg.Tunnel.MaxDetachedResumable == 0 {
-		cfg.Tunnel.MaxDetachedResumable = d.Tunnel.MaxDetachedResumable
 	}
 	if cfg.Tunnel.MaxStreamsPerTunnel == 0 {
 		cfg.Tunnel.MaxStreamsPerTunnel = d.Tunnel.MaxStreamsPerTunnel

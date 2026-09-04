@@ -28,6 +28,53 @@ clients:
 	}
 }
 
+func TestLoadServerResumeDefaultsAndExplicitOverrides(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "client.token")
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	load := func(t *testing.T, tunnelYAML string) *config.ServerConfig {
+		t.Helper()
+		cfgPath := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".yaml")
+		cfgBody := `root_domain: example.com
+clients:
+  - client_id: dev-1
+    subdomain: app
+    token_file: client.token
+` + tunnelYAML
+		if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.LoadServer(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	t.Run("omitted", func(t *testing.T) {
+		cfg := load(t, "")
+		if !cfg.Tunnel.EnableResume {
+			t.Fatal("EnableResume = false, want true when omitted")
+		}
+		if cfg.Tunnel.MaxDetachedResumable != pollmux.DefaultMaxDetachedResumable {
+			t.Fatalf("MaxDetachedResumable = %d, want %d", cfg.Tunnel.MaxDetachedResumable, pollmux.DefaultMaxDetachedResumable)
+		}
+	})
+
+	t.Run("explicit false and zero", func(t *testing.T) {
+		cfg := load(t, "tunnel:\n  enable_resume: false\n  max_detached_resumable: 0\n")
+		if cfg.Tunnel.EnableResume {
+			t.Fatal("EnableResume = true, want explicit false")
+		}
+		if cfg.Tunnel.MaxDetachedResumable != 0 {
+			t.Fatalf("MaxDetachedResumable = %d, want explicit 0", cfg.Tunnel.MaxDetachedResumable)
+		}
+	})
+}
+
 func TestLoadServerExample(t *testing.T) {
 	dir := t.TempDir()
 	localDir := filepath.Join(dir, "local")

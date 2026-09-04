@@ -104,7 +104,9 @@ func (s *Server) authenticateSession(next http.Handler) http.Handler {
 		clientID := sess.Meta()["client_id"]
 		binding, ok := s.clients.Lookup(clientID)
 		if !ok || !validToken(binding.Token, bearerToken(r)) {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			// Do not reveal whether a random session ID exists to unauthenticated
+			// callers; nonexistent sessions also return 404 from pollmux.
+			http.NotFound(w, r)
 			return
 		}
 		next.ServeHTTP(w, r)

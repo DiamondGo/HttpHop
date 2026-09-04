@@ -35,7 +35,7 @@ tunnel:
   # stream_max_duration: 45s   # forced rollover of one stream leg; must be >= 2x heartbeat_interval
   # enable_websocket: true     # let clients attach over a single WebSocket instead
   # Resume is negotiated only for WebSocket or two-way stream mode; batch
-  # tunnels keep working normally but cannot preserve active requests. of polling
+  # tunnels keep working normally but cannot preserve active requests.
 
 proxy:
   response_header_timeout: 60s
