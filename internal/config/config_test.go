@@ -28,6 +28,60 @@ clients:
 	}
 }
 
+func TestLoadServerResumeDefaultsAndExplicitOverrides(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "client.token")
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	load := func(t *testing.T, tunnelYAML string) *config.ServerConfig {
+		t.Helper()
+		cfgPath := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".yaml")
+		cfgBody := `root_domain: example.com
+clients:
+  - client_id: dev-1
+    subdomain: app
+    token_file: client.token
+` + tunnelYAML
+		if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.LoadServer(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	t.Run("omitted", func(t *testing.T) {
+		cfg := load(t, "")
+		if !cfg.Tunnel.EnableResume {
+			t.Fatal("EnableResume = false, want true when omitted")
+		}
+		if cfg.Tunnel.MaxDetachedResumable != pollmux.DefaultMaxDetachedResumable {
+			t.Fatalf("MaxDetachedResumable = %d, want %d", cfg.Tunnel.MaxDetachedResumable, pollmux.DefaultMaxDetachedResumable)
+		}
+	})
+
+	t.Run("explicit false and zero", func(t *testing.T) {
+		cfg := load(t, "tunnel:\n  enable_resume: false\n  max_detached_resumable: 0\n")
+		if cfg.Tunnel.EnableResume {
+			t.Fatal("EnableResume = true, want explicit false")
+		}
+		if cfg.Tunnel.MaxDetachedResumable != 0 {
+			t.Fatalf("MaxDetachedResumable = %d, want explicit 0", cfg.Tunnel.MaxDetachedResumable)
+		}
+	})
+
+	t.Run("explicit negative disables detached cap", func(t *testing.T) {
+		cfg := load(t, "tunnel:\n  max_detached_resumable: -1\n")
+		if cfg.Tunnel.MaxDetachedResumable != -1 {
+			t.Fatalf("MaxDetachedResumable = %d, want explicit -1", cfg.Tunnel.MaxDetachedResumable)
+		}
+	})
+}
+
 func TestLoadServerExample(t *testing.T) {
 	dir := t.TempDir()
 	localDir := filepath.Join(dir, "local")
@@ -457,6 +511,129 @@ func TestEnableWebSocketMapping(t *testing.T) {
 	pcfg := cfg.PollmuxServerConfig(nil)
 	if !pcfg.EnableWebSocket {
 		t.Fatal("expected EnableWebSocket to carry through to pollmux.ServerConfig")
+	}
+}
+
+func TestResumeDefaultsAndMapping(t *testing.T) {
+	cfg := config.Defaults()
+	if !cfg.Tunnel.EnableResume {
+		t.Fatal("server resume should be enabled by default")
+	}
+	pcfg := cfg.PollmuxServerConfig(nil)
+	if !pcfg.EnableResume {
+		t.Fatal("expected EnableResume to carry through to pollmux.ServerConfig")
+	}
+	if pcfg.ResumeGrace != pollmux.DefaultResumeGrace || pcfg.MaxReplayBytes != pollmux.DefaultMaxReplayBytes ||
+		pcfg.MaxDetachedResumable != pollmux.DefaultMaxDetachedResumable {
+		t.Fatalf("unexpected resume mapping: grace=%v replay=%d detached=%d", pcfg.ResumeGrace, pcfg.MaxReplayBytes, pcfg.MaxDetachedResumable)
+	}
+
+	clientCfg := config.DefaultClient()
+	if !clientCfg.Transport.PreferResume || clientCfg.Transport.MaxReplayBytes != pollmux.DefaultMaxReplayBytes {
+		t.Fatalf("unexpected client resume defaults: prefer=%v replay=%d", clientCfg.Transport.PreferResume, clientCfg.Transport.MaxReplayBytes)
+	}
+}
+
+func TestLoadClientResumeDefaultsAndOptOut(t *testing.T) {
+	dir := t.TempDir()
+	token := strings.Repeat("r", 32)
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := `client_id: dev-1
+server:
+  url: http://127.0.0.1:1
+  token_file: token
+local:
+  target: 127.0.0.1:8080
+`
+	path := filepath.Join(dir, "client.yaml")
+	if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded[0].Transport.PreferResume {
+		t.Fatal("omitted prefer_resume should default to true")
+	}
+
+	if err := os.WriteFile(path, []byte(base+"transport:\n  prefer_resume: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = config.LoadClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded[0].Transport.PreferResume {
+		t.Fatal("explicit prefer_resume: false was not honored")
+	}
+}
+
+func TestLoadMultiClientResumeDefaults(t *testing.T) {
+	dir := t.TempDir()
+	token := strings.Repeat("m", 32)
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "client.yaml")
+	body := `transport:
+  poll_grace: 10s
+services:
+  - client_id: dev-1
+    token_file: token
+    local:
+      target: 127.0.0.1:8080
+    server:
+      url: http://127.0.0.1:1
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.LoadClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded[0].Transport.PreferResume || loaded[0].Transport.MaxReplayBytes != pollmux.DefaultMaxReplayBytes {
+		t.Fatalf("unexpected multi-service resume defaults: prefer=%v replay=%d", loaded[0].Transport.PreferResume, loaded[0].Transport.MaxReplayBytes)
+	}
+}
+
+func TestResumeValidation(t *testing.T) {
+	baseConfig := func() config.ServerConfig {
+		cfg := config.Defaults()
+		cfg.RootDomain = "example.com"
+		cfg.Clients = []config.ClientBinding{{
+			ClientID: "app-1", Subdomain: "app", Token: strings.Repeat("a", 32), MaxClients: 1,
+		}}
+		return cfg
+	}
+
+	cfg := baseConfig()
+	cfg.Tunnel.ResumeGrace = pollmux.MaxResumeGrace + time.Second
+	if err := config.ValidateServer(&cfg); err == nil || !strings.Contains(err.Error(), "resume_grace") {
+		t.Fatalf("expected resume_grace error, got %v", err)
+	}
+
+	cfg = baseConfig()
+	cfg.Tunnel.MaxReplayBytes = -1
+	if err := config.ValidateServer(&cfg); err == nil || !strings.Contains(err.Error(), "max_replay_bytes") {
+		t.Fatalf("expected max_replay_bytes error, got %v", err)
+	}
+
+	cfg = baseConfig()
+	cfg.Tunnel.MaxDetachedResumable = -1
+	if err := config.ValidateServer(&cfg); err != nil {
+		t.Fatalf("negative max_detached_resumable should disable the cap: %v", err)
+	}
+
+	cfg = baseConfig()
+	cfg.Tunnel.EnableResume = false
+	cfg.Tunnel.ResumeGrace = pollmux.MaxResumeGrace + time.Second
+	cfg.Tunnel.MaxReplayBytes = -1
+	if err := config.ValidateServer(&cfg); err != nil {
+		t.Fatalf("disabled resume should ignore resume-only limits: %v", err)
 	}
 }
 

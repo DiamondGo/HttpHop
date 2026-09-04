@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -591,6 +593,221 @@ func TestIntegrationStreamRollover(t *testing.T) {
 			t.Fatalf("request %d after rollover: status = %d", i, resp.StatusCode)
 		}
 		time.Sleep(400 * time.Millisecond)
+	}
+}
+
+// disconnectProxy forwards TCP connections and can sever every currently
+// active leg. The listener remains up, so pollmux can reconnect to the same
+// address and exercise its real resume handshake.
+type disconnectProxy struct {
+	ln       net.Listener
+	upstream string
+	mu       sync.Mutex
+	conns    map[net.Conn]struct{}
+	accepted atomic.Int64
+}
+
+func newDisconnectProxy(t *testing.T, upstream string) *disconnectProxy {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &disconnectProxy{ln: ln, upstream: upstream, conns: make(map[net.Conn]struct{})}
+	go p.serve()
+	t.Cleanup(func() {
+		_ = p.ln.Close()
+		p.drop()
+	})
+	return p
+}
+
+func (p *disconnectProxy) url() string { return "http://" + p.ln.Addr().String() }
+
+func (p *disconnectProxy) serve() {
+	for {
+		downstream, err := p.ln.Accept()
+		if err != nil {
+			return
+		}
+		upstream, err := net.Dial("tcp", p.upstream)
+		if err != nil {
+			_ = downstream.Close()
+			continue
+		}
+		p.accepted.Add(1)
+		p.track(downstream, true)
+		p.track(upstream, true)
+		go p.pipe(downstream, upstream)
+		go p.pipe(upstream, downstream)
+	}
+}
+
+func (p *disconnectProxy) pipe(dst, src net.Conn) {
+	_, _ = io.Copy(dst, src)
+	_ = dst.Close()
+	_ = src.Close()
+	p.track(dst, false)
+	p.track(src, false)
+}
+
+func (p *disconnectProxy) track(conn net.Conn, add bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if add {
+		p.conns[conn] = struct{}{}
+	} else {
+		delete(p.conns, conn)
+	}
+}
+
+func (p *disconnectProxy) drop() {
+	p.mu.Lock()
+	conns := make([]net.Conn, 0, len(p.conns))
+	for conn := range p.conns {
+		conns = append(conns, conn)
+	}
+	p.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+func TestIntegrationResumeKeepsActiveStream(t *testing.T) {
+	for _, transport := range []string{"websocket", "stream"} {
+		t.Run(transport, func(t *testing.T) {
+			payload := make([]byte, 768<<10)
+			if _, err := rand.Read(payload); err != nil {
+				t.Fatal(err)
+			}
+			started := make(chan struct{})
+			var startedOnce sync.Once
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				flusher, _ := w.(http.Flusher)
+				for off := 0; off < len(payload); off += 8 << 10 {
+					end := min(off+(8<<10), len(payload))
+					_, _ = w.Write(payload[off:end])
+					if flusher != nil {
+						flusher.Flush()
+					}
+					startedOnce.Do(func() { close(started) })
+					time.Sleep(3 * time.Millisecond)
+				}
+			}))
+			defer backend.Close()
+
+			logger := zap.NewNop()
+			srvCfg := config.Defaults()
+			srvCfg.RootDomain = "httphop.io"
+			srvCfg.TLS.Disable = true
+			srvCfg.Status.Enabled = false
+			srvCfg.Tunnel.PollTimeout = 500 * time.Millisecond
+			srvCfg.Tunnel.SessionTimeout = time.Second
+			srvCfg.Tunnel.SweepInterval = 50 * time.Millisecond
+			srvCfg.Tunnel.EnableResume = true
+			srvCfg.Tunnel.ResumeGrace = 3 * time.Second
+			srvCfg.Tunnel.HeartbeatInterval = 100 * time.Millisecond
+			srvCfg.Tunnel.StreamMaxDuration = time.Second
+			srvCfg.Clients = []config.ClientBinding{{
+				ClientID: "resume-client", Subdomain: "@", PathPrefix: "/service", StripPrefix: true,
+				Token: integrationClientToken, MaxClients: 1,
+			}}
+			if transport == "websocket" {
+				srvCfg.Tunnel.EnableWebSocket = true
+			} else {
+				srvCfg.Tunnel.PollMode = "stream"
+			}
+
+			srv, err := server.NewServer(&srvCfg, logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := srv.StartOnListener(ln); err != nil {
+				t.Fatal(err)
+			}
+			serverURL := "http://" + ln.Addr().String()
+			proxy := newDisconnectProxy(t, ln.Addr().String())
+
+			cliCfg := config.DefaultClient()
+			cliCfg.ClientID = "resume-client"
+			cliCfg.Server.URL = proxy.url()
+			cliCfg.Server.Token = integrationClientToken
+			cliCfg.Local.Target = strings.TrimPrefix(backend.URL, "http://")
+			cliCfg.Health.Enabled = false
+			cliCfg.Transport.PreferResume = true
+			cliCfg.Transport.PollGrace = 300 * time.Millisecond
+			if transport == "websocket" {
+				cliCfg.Transport.PreferWebSocket = true
+			} else {
+				cliCfg.Transport.PreferStream = true
+				cliCfg.Transport.UploadStreamPreference = "stream"
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				_ = client.New(&cliCfg, logger).Run(ctx)
+				close(done)
+			}()
+			defer func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+				}
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer stopCancel()
+				_ = srv.Stop(stopCtx)
+			}()
+
+			waitForTunnel(t, srv, "@")
+			pool, _ := srv.Registry().Pool("@")
+			original := pool.ByID("resume-client")
+			if original == nil || !original.Session.Resumable() {
+				t.Fatal("tunnel did not negotiate resume")
+			}
+			originalSessionID := original.Session.ID
+			acceptedBefore := proxy.accepted.Load()
+
+			req, _ := http.NewRequest(http.MethodGet, serverURL+"/service/slow", nil)
+			req.Host = "httphop.io"
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("backend response did not start")
+			}
+			time.Sleep(30 * time.Millisecond)
+			proxy.drop()
+
+			got, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read response across resume: %v", err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("response corrupted across resume: got %d bytes, want %d", len(got), len(payload))
+			}
+
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) && proxy.accepted.Load() <= acceptedBefore {
+				time.Sleep(20 * time.Millisecond)
+			}
+			if proxy.accepted.Load() <= acceptedBefore {
+				t.Fatal("client opened no replacement transport after disconnect")
+			}
+			current := pool.ByID("resume-client")
+			if current == nil || current.Session.ID != originalSessionID {
+				t.Fatalf("session was replaced instead of resumed: got %#v, want %q", current, originalSessionID)
+			}
+		})
 	}
 }
 

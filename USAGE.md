@@ -43,6 +43,9 @@
     transport:
       poll_interval: 0s
       poll_grace: 10s
+      prefer_websocket: true
+      prefer_resume: true
+      max_replay_bytes: 16777216
 
     health:
       enabled: true
@@ -68,3 +71,31 @@
   • transport、health、logging 为共享默认值，各 service 可通过同名字段覆盖 health。
   • server（url/control_path/insecure_skip_verify）和 token_file 在每个 service 中单独配置。
   • 旧的单服务格式（顶层 client_id + local + server）仍然兼容。
+
+  Resume 配置升级
+
+  pollmux v0.2 可在 WebSocket（或上下行均为 stream）短暂断线后恢复同一个
+  yamux 会话，使正在处理的 HTTP 请求继续执行。建议在 server.yaml 中加入：
+
+    tunnel:
+      enable_websocket: true
+      enable_resume: true
+      resume_grace: 30s
+      max_replay_bytes: 16777216
+      max_detached_resumable: 1024
+
+  client.yaml 的 transport 中加入：
+
+    prefer_websocket: true
+    prefer_resume: true
+    max_replay_bytes: 16777216
+
+  新版本默认启用 enable_resume/prefer_resume，但只有同时启用 WebSocket 或双向
+  stream 时才能协商成功；batch 模式仍可正常工作，但不能保持断线时的活动请求。
+  修改后先重启 server，再重启 client。旧客户端与新服务端可以混用。
+
+  内存受 max_replay_bytes（每条隧道、每个方向）和服务端
+  max_detached_resumable 控制；负值表示不限制 detached 会话数，小内存服务器应
+  使用较小的正值。反向代理的请求超时应大于 resume_grace，并确保
+  /tunnel/{id}/resume 与其他 /tunnel 路径走相同代理
+  和鉴权规则。

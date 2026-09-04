@@ -16,11 +16,11 @@ import (
 )
 
 type Client struct {
-	cfg          *config.ClientConfig
-	handler      *StreamHandler
-	health       *Checker
-	logger       *zap.Logger
-	diagnostics  *sessionDiagnostics
+	cfg         *config.ClientConfig
+	handler     *StreamHandler
+	health      *Checker
+	logger      *zap.Logger
+	diagnostics *sessionDiagnostics
 }
 
 func New(cfg *config.ClientConfig, logger *zap.Logger) *Client {
@@ -89,6 +89,8 @@ func (c *Client) buildConnector(logger *slog.Logger) *pollmux.Connector {
 		UploadStreamPreference: c.cfg.Transport.UploadStreamPreference,
 		UploadProbeTimeout:     c.cfg.Transport.UploadProbeTimeout,
 		PreferWebSocket:        c.cfg.Transport.PreferWebSocket,
+		PreferResume:           c.cfg.Transport.PreferResume,
+		MaxReplayBytes:         c.cfg.Transport.MaxReplayBytes,
 		LocalHealth:            localHealth,
 		InsecureSkipVerify:     c.cfg.Server.InsecureSkipVerify,
 		Logger:                 logger,

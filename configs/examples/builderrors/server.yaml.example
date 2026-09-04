@@ -16,6 +16,11 @@ tunnel:
   session_timeout: 60s
   max_streams_per_tunnel: 256
   supersede_drain_timeout: 10m
+  enable_websocket: true
+  enable_resume: true
+  resume_grace: 30s
+  max_replay_bytes: 16777216
+  max_detached_resumable: 1024
 
 proxy:
   response_header_timeout: 60s

@@ -12,6 +12,10 @@ import (
 func LoadServer(path string) (*ServerConfig, error) {
 	cfg := Defaults()
 	v := viper.New()
+	// Viper defaults preserve explicit false/zero values while supplying defaults
+	// when these resumable-session options are omitted from YAML.
+	v.SetDefault("tunnel.enable_resume", true)
+	v.SetDefault("tunnel.max_detached_resumable", pollmux.DefaultMaxDetachedResumable)
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -31,6 +35,11 @@ func LoadServer(path string) (*ServerConfig, error) {
 
 func LoadClient(path string) ([]*ClientConfig, error) {
 	v := viper.New()
+	// Resume is enabled by default for new configurations. Viper defaults let
+	// an explicit `prefer_resume: false` override that behavior in both the
+	// single-service and multi-service formats.
+	v.SetDefault("transport.prefer_resume", true)
+	v.SetDefault("transport.max_replay_bytes", pollmux.DefaultMaxReplayBytes)
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -161,6 +170,12 @@ func applyServerDefaults(cfg *ServerConfig) {
 	if cfg.Tunnel.StreamMaxDuration == 0 {
 		cfg.Tunnel.StreamMaxDuration = d.Tunnel.StreamMaxDuration
 	}
+	if cfg.Tunnel.ResumeGrace == 0 {
+		cfg.Tunnel.ResumeGrace = d.Tunnel.ResumeGrace
+	}
+	if cfg.Tunnel.MaxReplayBytes == 0 {
+		cfg.Tunnel.MaxReplayBytes = d.Tunnel.MaxReplayBytes
+	}
 	if cfg.Tunnel.MaxStreamsPerTunnel == 0 {
 		cfg.Tunnel.MaxStreamsPerTunnel = d.Tunnel.MaxStreamsPerTunnel
 	}
@@ -205,6 +220,9 @@ func applyClientDefaults(cfg *ClientConfig) {
 	}
 	if cfg.Transport.MaxSendChunk == 0 {
 		cfg.Transport.MaxSendChunk = d.Transport.MaxSendChunk
+	}
+	if cfg.Transport.MaxReplayBytes == 0 {
+		cfg.Transport.MaxReplayBytes = d.Transport.MaxReplayBytes
 	}
 	if cfg.Health.Interval == 0 {
 		cfg.Health.Interval = d.Health.Interval
@@ -251,6 +269,14 @@ func ValidateServer(cfg *ServerConfig) error {
 	if pollMode == pollmux.PollModeStream && cfg.Tunnel.StreamMaxDuration < 2*cfg.Tunnel.HeartbeatInterval {
 		return fmt.Errorf("tunnel.stream_max_duration (%v) must be >= 2 × tunnel.heartbeat_interval (%v)",
 			cfg.Tunnel.StreamMaxDuration, cfg.Tunnel.HeartbeatInterval)
+	}
+	if cfg.Tunnel.EnableResume {
+		if cfg.Tunnel.ResumeGrace <= 0 || cfg.Tunnel.ResumeGrace > pollmux.MaxResumeGrace {
+			return fmt.Errorf("tunnel.resume_grace (%v) must be > 0 and <= %v", cfg.Tunnel.ResumeGrace, pollmux.MaxResumeGrace)
+		}
+		if cfg.Tunnel.MaxReplayBytes <= 0 {
+			return fmt.Errorf("tunnel.max_replay_bytes must be > 0")
+		}
 	}
 	if len(cfg.Clients) == 0 {
 		return fmt.Errorf("at least one client binding is required")
@@ -359,6 +385,9 @@ func ValidateClient(cfg *ClientConfig) error {
 		default:
 			return fmt.Errorf("health.mode must be tcp or http")
 		}
+	}
+	if cfg.Transport.MaxReplayBytes <= 0 {
+		return fmt.Errorf("transport.max_replay_bytes must be > 0")
 	}
 	switch cfg.Transport.UploadStreamPreference {
 	case "", pollmux.PollModeBatch, pollmux.PollModeStream:

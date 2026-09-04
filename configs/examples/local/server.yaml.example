@@ -22,12 +22,20 @@ tunnel:
   high_water_warn: 0
   poll_mode: "batch"
   max_streams_per_tunnel: 256
+  # Resume is enabled by default. It preserves the yamux session and active
+  # requests across a short WebSocket/two-way-stream transport interruption.
+  enable_resume: true
+  resume_grace: 30s
+  max_replay_bytes: 16777216       # per direction, per resumable tunnel
+  max_detached_resumable: 1024
   # Stream mode + WebSocket transport (pollmux >= v0.1.0). Loopback has no
   # intermediate proxy to worry about, so this is a safe place to try them:
   # poll_mode: "stream"        # replaces long-poll batching with a held-open response
   # heartbeat_interval: 10s    # idle time before a stream poll sends a heartbeat frame
   # stream_max_duration: 45s   # forced rollover of one stream leg; must be >= 2x heartbeat_interval
   # enable_websocket: true     # let clients attach over a single WebSocket instead of polling
+  # Resume is negotiated only for WebSocket or two-way stream mode; batch
+  # tunnels keep working normally but cannot preserve active requests.
 
 proxy:
   response_header_timeout: 60s

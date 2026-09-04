@@ -82,10 +82,35 @@ func (s *Server) buildControlMux() *mux.Router {
 	prefix := config.NormalizeControlPath(s.cfg.ControlPath)
 	m := mux.NewRouter()
 	m.Handle(prefix+"/connect", pollmux.ConnectHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodPost)
-	m.Handle(prefix+"/{id}/poll", pollmux.PollHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodPost)
-	m.Handle(prefix+"/{id}/ws", pollmux.WebSocketHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodGet)
-	m.Handle(prefix+"/{id}", pollmux.DeleteHandler(s.sessionStore, s.pollmuxCfg, s.hooks)).Methods(http.MethodDelete)
+	m.Handle(prefix+"/{id}/poll", s.authenticateSession(pollmux.PollHandler(s.sessionStore, s.pollmuxCfg, s.hooks))).Methods(http.MethodPost)
+	m.Handle(prefix+"/{id}/ws", s.authenticateSession(pollmux.WebSocketHandler(s.sessionStore, s.pollmuxCfg, s.hooks))).Methods(http.MethodGet)
+	m.Handle(prefix+"/{id}/resume", s.authenticateSession(pollmux.ResumeHandler(s.sessionStore, s.pollmuxCfg, s.hooks))).Methods(http.MethodPost)
+	m.Handle(prefix+"/{id}", s.authenticateSession(pollmux.DeleteHandler(s.sessionStore, s.pollmuxCfg, s.hooks))).Methods(http.MethodDelete)
 	return m
+}
+
+// authenticateSession applies the same client token boundary to every
+// session-specific endpoint. pollmux only authenticates Connect through its
+// Hooks API; poll, WebSocket, resume, and delete must be protected by the
+// embedding application.
+func (s *Server) authenticateSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := mux.Vars(r)["id"]
+		sess, ok := s.sessionStore.Get(id)
+		if !ok {
+			next.ServeHTTP(w, r) // preserve pollmux's 404 response
+			return
+		}
+		clientID := sess.Meta()["client_id"]
+		binding, ok := s.clients.Lookup(clientID)
+		if !ok || !validToken(binding.Token, bearerToken(r)) {
+			// Do not reveal whether a random session ID exists to unauthenticated
+			// callers; nonexistent sessions also return 404 from pollmux.
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) buildHooks() pollmux.Hooks {
