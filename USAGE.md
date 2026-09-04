@@ -95,6 +95,7 @@
   修改后先重启 server，再重启 client。旧客户端与新服务端可以混用。
 
   内存受 max_replay_bytes（每条隧道、每个方向）和服务端
-  max_detached_resumable 控制；小内存服务器应降低这些值。反向代理的请求超时应
-  大于 resume_grace，并确保 /tunnel/{id}/resume 与其他 /tunnel 路径走相同代理
+  max_detached_resumable 控制；负值表示不限制 detached 会话数，小内存服务器应
+  使用较小的正值。反向代理的请求超时应大于 resume_grace，并确保
+  /tunnel/{id}/resume 与其他 /tunnel 路径走相同代理
   和鉴权规则。

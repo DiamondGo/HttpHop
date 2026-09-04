@@ -119,7 +119,7 @@ tunnel:
   enable_resume: true
   resume_grace: 30s
   max_replay_bytes: 16777216       # 16 MiB per direction per tunnel
-  max_detached_resumable: 1024     # lower this on small servers
+  max_detached_resumable: 1024     # lower on small servers; negative disables the cap
 ```
 
 Recommended client settings:
@@ -139,8 +139,9 @@ set `enable_resume: false` on the server or `prefer_resume: false` on clients.
 
 Memory planning: `max_replay_bytes` is a per-direction ceiling on each side, not
 a global pool. Detached resumable sessions also remain allocated for
-`resume_grace`, bounded server-side by `max_detached_resumable`. Use smaller
-values where many tunnels share a memory-constrained host. Keep proxy
+`resume_grace`, bounded server-side by `max_detached_resumable`. Use a negative
+value to disable this cap, or smaller positive values where many tunnels share
+a memory-constrained host. Keep proxy
 `response_header_timeout` longer than `resume_grace` if requests should wait for
 recovery. The status endpoint reports `resumable: true` for a successfully
 negotiated tunnel and includes `resume_deadline` while its transport is detached.

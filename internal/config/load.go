@@ -270,14 +270,13 @@ func ValidateServer(cfg *ServerConfig) error {
 		return fmt.Errorf("tunnel.stream_max_duration (%v) must be >= 2 × tunnel.heartbeat_interval (%v)",
 			cfg.Tunnel.StreamMaxDuration, cfg.Tunnel.HeartbeatInterval)
 	}
-	if cfg.Tunnel.ResumeGrace <= 0 || cfg.Tunnel.ResumeGrace > pollmux.MaxResumeGrace {
-		return fmt.Errorf("tunnel.resume_grace (%v) must be > 0 and <= %v", cfg.Tunnel.ResumeGrace, pollmux.MaxResumeGrace)
-	}
-	if cfg.Tunnel.MaxReplayBytes <= 0 {
-		return fmt.Errorf("tunnel.max_replay_bytes must be > 0")
-	}
-	if cfg.Tunnel.MaxDetachedResumable < 0 {
-		return fmt.Errorf("tunnel.max_detached_resumable must be >= 0")
+	if cfg.Tunnel.EnableResume {
+		if cfg.Tunnel.ResumeGrace <= 0 || cfg.Tunnel.ResumeGrace > pollmux.MaxResumeGrace {
+			return fmt.Errorf("tunnel.resume_grace (%v) must be > 0 and <= %v", cfg.Tunnel.ResumeGrace, pollmux.MaxResumeGrace)
+		}
+		if cfg.Tunnel.MaxReplayBytes <= 0 {
+			return fmt.Errorf("tunnel.max_replay_bytes must be > 0")
+		}
 	}
 	if len(cfg.Clients) == 0 {
 		return fmt.Errorf("at least one client binding is required")

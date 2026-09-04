@@ -73,6 +73,13 @@ clients:
 			t.Fatalf("MaxDetachedResumable = %d, want explicit 0", cfg.Tunnel.MaxDetachedResumable)
 		}
 	})
+
+	t.Run("explicit negative disables detached cap", func(t *testing.T) {
+		cfg := load(t, "tunnel:\n  max_detached_resumable: -1\n")
+		if cfg.Tunnel.MaxDetachedResumable != -1 {
+			t.Fatalf("MaxDetachedResumable = %d, want explicit -1", cfg.Tunnel.MaxDetachedResumable)
+		}
+	})
 }
 
 func TestLoadServerExample(t *testing.T) {
@@ -594,24 +601,39 @@ services:
 }
 
 func TestResumeValidation(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.RootDomain = "example.com"
-	cfg.Clients = []config.ClientBinding{{
-		ClientID: "app-1", Subdomain: "app", Token: strings.Repeat("a", 32), MaxClients: 1,
-	}}
+	baseConfig := func() config.ServerConfig {
+		cfg := config.Defaults()
+		cfg.RootDomain = "example.com"
+		cfg.Clients = []config.ClientBinding{{
+			ClientID: "app-1", Subdomain: "app", Token: strings.Repeat("a", 32), MaxClients: 1,
+		}}
+		return cfg
+	}
+
+	cfg := baseConfig()
 	cfg.Tunnel.ResumeGrace = pollmux.MaxResumeGrace + time.Second
 	if err := config.ValidateServer(&cfg); err == nil || !strings.Contains(err.Error(), "resume_grace") {
 		t.Fatalf("expected resume_grace error, got %v", err)
 	}
 
-	cfg = config.Defaults()
-	cfg.RootDomain = "example.com"
-	cfg.Clients = []config.ClientBinding{{
-		ClientID: "app-1", Subdomain: "app", Token: strings.Repeat("a", 32), MaxClients: 1,
-	}}
+	cfg = baseConfig()
 	cfg.Tunnel.MaxReplayBytes = -1
 	if err := config.ValidateServer(&cfg); err == nil || !strings.Contains(err.Error(), "max_replay_bytes") {
 		t.Fatalf("expected max_replay_bytes error, got %v", err)
+	}
+
+	cfg = baseConfig()
+	cfg.Tunnel.MaxDetachedResumable = -1
+	if err := config.ValidateServer(&cfg); err != nil {
+		t.Fatalf("negative max_detached_resumable should disable the cap: %v", err)
+	}
+
+	cfg = baseConfig()
+	cfg.Tunnel.EnableResume = false
+	cfg.Tunnel.ResumeGrace = pollmux.MaxResumeGrace + time.Second
+	cfg.Tunnel.MaxReplayBytes = -1
+	if err := config.ValidateServer(&cfg); err != nil {
+		t.Fatalf("disabled resume should ignore resume-only limits: %v", err)
 	}
 }
 

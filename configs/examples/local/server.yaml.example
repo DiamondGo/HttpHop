@@ -33,7 +33,7 @@ tunnel:
   # poll_mode: "stream"        # replaces long-poll batching with a held-open response
   # heartbeat_interval: 10s    # idle time before a stream poll sends a heartbeat frame
   # stream_max_duration: 45s   # forced rollover of one stream leg; must be >= 2x heartbeat_interval
-  # enable_websocket: true     # let clients attach over a single WebSocket instead
+  # enable_websocket: true     # let clients attach over a single WebSocket instead of polling
   # Resume is negotiated only for WebSocket or two-way stream mode; batch
   # tunnels keep working normally but cannot preserve active requests.
 
